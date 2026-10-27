@@ -111,7 +111,10 @@ def flow_a(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, liv
     print(f"    delivered, delivery_hash={dh[:16]}…")
     assert hiring.verify_delivery(job, delivery), "delivery hash mismatch"
     print("    payer agent verified the delivery hash — matches")
-    svc.capture(job, payer=hiring.paypal_id)
+    # capture() enforces the same check itself (it requires the original
+    # delivery text and verifies it before any PayPal call), so the
+    # payer's pre-check above is the decision and capture is the gate.
+    svc.capture(job, payer=hiring.paypal_id, delivery_text=delivery)
     print(f"    CAPTURED: capture {job.capture_id} — agent paid "
           f"${job.quote['price_cents'] / 100:.2f}")
     receipt = receipt_for(job, "released")
@@ -135,7 +138,8 @@ def flow_b(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, liv
           f"(deadline: 5s)")
     # Guard: capture before delivery must be refused.
     try:
-        svc.capture(job, payer=hiring.paypal_id)
+        svc.capture(job, payer=hiring.paypal_id,
+                    delivery_text="not delivered")
         print("    [!] GUARD FAILED: capture before delivery succeeded")
     except Exception as e:
         print(f"    [guard] capture before delivery correctly refused: {e}")

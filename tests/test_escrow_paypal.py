@@ -77,7 +77,7 @@ def test_happy_path_capture(client):
     assert job.status == "AUTHORIZED"
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
     assert job.status == "DELIVERED"
-    svc.capture(job, payer="payer@example")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
     assert job.status == "CAPTURED"
     assert job.capture_id.startswith("CAPTURE-")
 
@@ -85,15 +85,15 @@ def test_happy_path_capture(client):
 def test_capture_before_delivery_refused(client):
     svc, job = _approved_authorized_job(client)
     with pytest.raises(EscrowError, match="cannot capture"):
-        svc.capture(job, payer="payer@example")
+        svc.capture(job, payer="payer@example", delivery_text="report v1")
 
 
 def test_double_capture_refused(client):
     svc, job = _approved_authorized_job(client)
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
-    svc.capture(job, payer="payer@example")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
     with pytest.raises(EscrowError, match="cannot capture"):
-        svc.capture(job, payer="payer@example")
+        svc.capture(job, payer="payer@example", delivery_text="report v1")
 
 
 def test_only_agent_can_deliver(client):
@@ -107,7 +107,7 @@ def test_only_payer_can_capture(client):
     svc, job = _approved_authorized_job(client)
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
     with pytest.raises(EscrowError, match="only the payer"):
-        svc.capture(job, payer="someone-else@example")
+        svc.capture(job, payer="someone-else@example", delivery_text="report v1")
 
 
 def test_void_before_deadline_refused(client):
@@ -171,7 +171,7 @@ def test_capture_non_completed_status_rejected(client, status):
     requests.post(f"{BASE}/mock/next-capture-status", json={"status": status},
                   timeout=10).raise_for_status()
     with pytest.raises(EscrowError, match="capture not completed"):
-        svc.capture(job, payer="payer@example")
+        svc.capture(job, payer="payer@example", delivery_text="report v1")
     assert job.status == "DELIVERED"
     assert job.capture_id == ""
 
@@ -265,13 +265,13 @@ def test_capture_response_lost_recovers_via_idempotent_retry(client):
     svc, job = _approved_authorized_job(client)
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
     requests.post(f"{BASE}/mock/drop-next-capture", timeout=10).raise_for_status()
-    result = svc.capture(job, payer="payer@example")
+    result = svc.capture(job, payer="payer@example", delivery_text="report v1")
     assert result["status"] == "COMPLETED"
     assert job.status == "CAPTURED"
     assert job.capture_id.startswith("CAPTURE-")
     assert not job.capture_reconciled  # recovered by replay, id observed
     with pytest.raises(EscrowError, match="cannot capture"):
-        svc.capture(job, payer="payer@example")
+        svc.capture(job, payer="payer@example", delivery_text="report v1")
 
 
 def test_void_response_lost_recovers_via_idempotent_retry(client):
@@ -343,7 +343,7 @@ def test_capture_response_lost_reconciles_from_authorization():
     stub = _StubPayPal()
     svc, job = _stub_authorized_job(stub)
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
-    result = svc.capture(job, payer="payer@example")
+    result = svc.capture(job, payer="payer@example", delivery_text="report v1")
     assert result["status"] == "COMPLETED"
     assert job.status == "CAPTURED"
     assert job.capture_id == ""
@@ -372,3 +372,171 @@ def test_void_after_capture_rejected_via_reconcile():
     with pytest.raises(EscrowError, match="already captured"):
         svc.void_after_deadline(job, payer="payer@example")
     assert job.status == "AUTHORIZED"
+
+# ---------------------------------------------------------------------------
+# Round 2 fixes (Oct 27, 2026): delivery-hash verification in capture,
+# durable job store, forged `now` never accepted from the request path.
+# Grok's Low (double-delivery race) was already fixed in round 1 by the
+# per-job delivery lock — test_concurrent_deliveries_exactly_once above
+# covers it; no new work here.
+# ---------------------------------------------------------------------------
+
+def test_capture_empty_delivery_text_rejected(client):
+    """Capture with no delivery text is refused: verification needs the
+    original text, and an empty string can never hash to the delivery."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    with pytest.raises(EscrowError, match="delivery text required"):
+        svc.capture(job, payer="payer@example", delivery_text="")
+    assert job.status == "DELIVERED"
+    assert job.capture_id == ""
+
+
+def test_capture_wrong_delivery_text_rejected(client):
+    """Capture with a delivery text whose hash does not match the
+    delivered work is refused — the money never moves on unverified
+    content, even when the caller is the payer."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    with pytest.raises(EscrowError, match="delivery verification failed"):
+        svc.capture(job, payer="payer@example", delivery_text="report v2")
+    assert job.status == "DELIVERED"
+    assert job.capture_id == ""
+
+
+def test_capture_calls_injected_verifier(client):
+    """The injected delivery verifier is what runs: a verifier that
+    refuses makes capture fail, and one that accepts makes it succeed
+    even for text that does not match the delivery hash. This is the
+    hook the server wires to the hiring agent's verify_delivery."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    calls: list = []
+
+    def refusing(job_, text):
+        calls.append((job_.job_id, text))
+        return False
+
+    svc.delivery_verifier = refusing
+    with pytest.raises(EscrowError, match="delivery verification failed"):
+        svc.capture(job, payer="payer@example", delivery_text="report v1")
+    assert calls == [(job.job_id, "report v1")]
+    assert job.status == "DELIVERED"
+
+    svc.delivery_verifier = lambda job_, text: True
+    result = svc.capture(job, payer="payer@example", delivery_text="anything")
+    assert result["status"] == "COMPLETED"
+    assert job.status == "CAPTURED"
+
+
+def test_capture_uses_hiring_agent_verifier(client):
+    """The server wires HiringAgent.verify_delivery as the verifier, so
+    capture accepts the exact delivered text and refuses anything else."""
+    hiring = HiringAgent()
+    svc, job = _approved_authorized_job(client)
+    svc.delivery_verifier = hiring.verify_delivery
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    with pytest.raises(EscrowError, match="delivery verification failed"):
+        svc.capture(job, payer="payer@example", delivery_text="report v2")
+    result = svc.capture(job, payer="payer@example", delivery_text="report v1")
+    assert result["status"] == "COMPLETED"
+    assert job.status == "CAPTURED"
+
+
+def _restart_service(client, path, **kw):
+    """A fresh EscrowService on the same store file — a simulated
+    process restart: new objects, same durable state."""
+    from app.store import JsonFileStore
+    return EscrowService(client, store=JsonFileStore(path), **kw)
+
+
+def test_job_survives_restart_and_captures(client, tmp_path):
+    """Create, authorize and deliver, then 'restart' (a fresh service
+    on the same store file): the job must still be there, DELIVERED,
+    with its authorization id and delivery hash intact — and capture
+    must still work on it."""
+    import json
+    from app.store import JsonFileStore
+
+    path = tmp_path / "jobs.json"
+    svc1 = EscrowService(client, store=JsonFileStore(path))
+    job = svc1.create_job(quote=_quote(), payer="payer@example",
+                          agent="agent@example", deadline_seconds=3600)
+    order = svc1.create_order(job)
+    requests.post(f"{BASE}/mock/approve/{order['id']}", timeout=10).raise_for_status()
+    svc1.authorize(job)
+    svc1.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+
+    # The store file itself holds the full job, quote included.
+    stored = json.loads(path.read_text())["jobs"][job.job_id]
+    assert stored["status"] == "DELIVERED"
+    assert stored["authorization_id"] == job.authorization_id
+    assert stored["quote"]["price_cents"] == 1250
+    assert stored["quote"]["pay_to"] == "agent@example"
+
+    svc2 = _restart_service(client, path)
+    reloaded = svc2.get_job(job.job_id)
+    assert reloaded.status == "DELIVERED"
+    assert reloaded.authorization_id == job.authorization_id
+    assert reloaded.delivery_hash == job.delivery_hash
+    result = svc2.capture(reloaded, payer="payer@example",
+                          delivery_text="report v1")
+    assert result["status"] == "COMPLETED"
+    assert reloaded.status == "CAPTURED"
+
+    # And the capture survives a second restart too.
+    svc3 = _restart_service(client, path)
+    assert svc3.get_job(job.job_id).status == "CAPTURED"
+
+
+def test_job_survives_restart_and_voids(client, tmp_path):
+    """An AUTHORIZED job whose deadline passes must still be voidable
+    after a restart — the hold is not stranded by a process crash."""
+    from app.store import JsonFileStore
+
+    path = tmp_path / "jobs.json"
+    svc1 = EscrowService(client, store=JsonFileStore(path))
+    job = svc1.create_job(quote=_quote(), payer="payer@example",
+                          agent="agent@example", deadline_seconds=0)
+    order = svc1.create_order(job)
+    requests.post(f"{BASE}/mock/approve/{order['id']}", timeout=10).raise_for_status()
+    svc1.authorize(job)
+    time.sleep(1.1)
+
+    svc2 = _restart_service(client, path)
+    reloaded = svc2.get_job(job.job_id)
+    assert reloaded.status == "AUTHORIZED"
+    result = svc2.void_after_deadline(reloaded, payer="payer@example")
+    assert result == {}
+    assert reloaded.status == "VOIDED"
+
+
+def test_quoted_job_survives_restart(client, tmp_path):
+    """A job that only has an order (QUOTED, not yet authorized) must
+    survive a restart with its order id intact, and authorize after it."""
+    from app.store import JsonFileStore
+
+    path = tmp_path / "jobs.json"
+    svc1 = EscrowService(client, store=JsonFileStore(path))
+    job = svc1.create_job(quote=_quote(), payer="payer@example",
+                          agent="agent@example")
+    order = svc1.create_order(job)
+    requests.post(f"{BASE}/mock/approve/{order['id']}", timeout=10).raise_for_status()
+
+    svc2 = _restart_service(client, path)
+    reloaded = svc2.get_job(job.job_id)
+    assert reloaded.status == "QUOTED"
+    assert reloaded.order_id == order["id"]
+    svc2.authorize(reloaded)
+    assert reloaded.status == "AUTHORIZED"
+
+
+def test_store_rejects_corrupt_file(tmp_path):
+    """A corrupt store file fails loudly at startup instead of silently
+    dropping jobs."""
+    from app.store import JsonFileStore
+
+    path = tmp_path / "jobs.json"
+    path.write_text("{not valid json")
+    with pytest.raises(ValueError, match="corrupt"):
+        JsonFileStore(path)

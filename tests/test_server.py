@@ -99,7 +99,9 @@ def test_full_flow_over_http(client):
     _approve_and_authorize(client, job_id, order_id)
 
     # Capture before delivery must be refused.
-    r = client.post(f"/jobs/{job_id}/capture", json={"payer": PAYER},
+    r = client.post(f"/jobs/{job_id}/capture",
+                    json={"payer": PAYER,
+                          "delivery_text": "audit report: top-20 holders"},
                     headers=PAYER_H)
     assert r.status_code == 409
 
@@ -109,7 +111,9 @@ def test_full_flow_over_http(client):
                           "delivery_text": "audit report: top-20 holders"},
                     headers=_agent_headers(AUDITOR))
     assert r.status_code == 200, r.get_json()
-    r = client.post(f"/jobs/{job_id}/capture", json={"payer": PAYER},
+    r = client.post(f"/jobs/{job_id}/capture",
+                    json={"payer": PAYER,
+                          "delivery_text": "audit report: top-20 holders"},
                     headers=PAYER_H)
     assert r.status_code == 200, r.get_json()
     receipt = r.get_json()["receipt"]
@@ -260,3 +264,83 @@ def test_create_order_failure_leaves_no_job(client):
     r = client.post("/jobs", json={"brief": "audit the holders, budget $50"})
     assert r.status_code == 503, r.get_json()
     assert client.get("/jobs").get_json() == {"jobs": []}
+
+# ---------------------------------------------------------------------------
+# Round 2 fixes (Oct 27, 2026): delivery-hash verification in capture,
+# durable job store, forged `now` never accepted from the request path.
+# ---------------------------------------------------------------------------
+
+def test_capture_missing_delivery_text_rejected(client):
+    """Capture with no delivery_text field: 400. Verification needs the
+    original text — there is no default and no silent assumption."""
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/capture", json={"payer": PAYER},
+                    headers=PAYER_H)
+    assert r.status_code == 400, r.get_json()
+
+
+def test_capture_wrong_delivery_text_rejected(client):
+    """Capture with a delivery text that does not hash to the delivered
+    work: 409, and the job stays DELIVERED — the money never moves."""
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/capture",
+                    json={"payer": PAYER,
+                          "delivery_text": "different work entirely"},
+                    headers=PAYER_H)
+    assert r.status_code == 409, r.get_json()
+    assert "delivery verification failed" in r.get_json()["error"]
+    assert client.get(f"/jobs/{job_id}").get_json()["job"]["status"] == "DELIVERED"
+
+
+def test_void_forged_now_ignored(client):
+    """A forged future `now` sent with the void request must not void
+    early: the server never takes a timestamp from the request path,
+    so the deadline is still evaluated against wall-clock time."""
+    body = _create_job(client, deadline_seconds=3600)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    r = client.post(f"/jobs/{job_id}/void",
+                    json={"payer": PAYER, "now": 9999999999},
+                    headers=PAYER_H)
+    assert r.status_code == 409, r.get_json()
+    assert "deadline not reached" in r.get_json()["error"]
+    assert client.get(f"/jobs/{job_id}").get_json()["job"]["status"] == "AUTHORIZED"
+
+
+def test_restart_round_trip_over_http(client, mock_server, tmp_path):
+    """The whole flow across a simulated server restart, over HTTP:
+    create + authorize, swap in a fresh service on the same store file
+    (a new process would do the same), then deliver and capture — the
+    job, its hold and its hash are all still there."""
+    from app.server import hiring as server_hiring
+    from app.store import JsonFileStore
+
+    path = tmp_path / "jobs.json"
+
+    def fresh_service():
+        return EscrowService(
+            PayPalClient(client_id="mock", client_secret="mock",
+                         base_url=mock_server),
+            store=JsonFileStore(path),
+            delivery_verifier=server_hiring.verify_delivery)
+
+    flask_app.config["escrow"] = fresh_service()
+    body = _create_job(client)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+
+    # Simulate the restart: a brand-new service on the same file.
+    flask_app.config["escrow"] = fresh_service()
+    assert client.get(f"/jobs/{job_id}").get_json()["job"]["status"] == "AUTHORIZED"
+
+    r = client.post(f"/jobs/{job_id}/deliver",
+                    json={"agent": AUDITOR,
+                          "delivery_text": "audit report: top-20 holders"},
+                    headers=_agent_headers(AUDITOR))
+    assert r.status_code == 200, r.get_json()
+    r = client.post(f"/jobs/{job_id}/capture",
+                    json={"payer": PAYER,
+                          "delivery_text": "audit report: top-20 holders"},
+                    headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["receipt"]["outcome"] == "released"

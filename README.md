@@ -46,7 +46,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Full demo, no network, no money (mock PayPal sandbox):
 .venv/bin/python scripts/demo.py --mode mock
 
-# Tests (54 tests, mock PayPal included):
+# Tests (66 tests, mock PayPal included):
 .venv/bin/python -m pytest tests/ -q
 
 # HTTP service (needs sandbox creds, or point it at the mock):
@@ -140,6 +140,40 @@ was never observed) so a receipt can still be produced. A capture is
 only settled on a `COMPLETED` result and an authorization only on a
 `CREATED` one; a `DECLINED`/`DENIED` result never settles the job.
 
+## Delivery verification in capture (round 2)
+
+Capture now requires the original delivery text and verifies it against
+the hash recorded on the job **before any PayPal call** — the check the
+first review found missing. The escrow calls the hiring agent's
+`verify_delivery` (injected as the service's delivery verifier; a plain
+hash comparison is the default when none is injected), so funds can
+never be released on a delivery whose hash was never checked, whatever
+the caller claims. The HTTP capture endpoint takes
+`{payer, delivery_text}`; missing text is 400, a hash mismatch is 409,
+and the job stays DELIVERED.
+
+## Durable job store (round 2)
+
+Jobs no longer live only in memory: they persist in a pluggable store
+(`app/store.py`). The server defaults to a JSON file (`jobs.json` in the
+project root, env `LAMPLIGHT_JOBS_FILE` to move it; gitignored), rewritten
+atomically on every state change, so a restart never loses a job or its
+PayPal ids — a fresh service on the same file picks up AUTHORIZED and
+DELIVERED jobs and capture/void keep working. Tests inject an in-memory
+store. One stated limit: the JSON file is for a single-process demo
+server; a multi-worker deployment needs a store with real concurrency
+control.
+
+## Forged timestamps (round 2)
+
+The void deadline is always evaluated against wall-clock time. The
+server never takes a timestamp from the request path — a `now` field in
+a void request body is ignored, so a forged future timestamp cannot
+void before the real deadline. The `now` parameters on
+`void_after_deadline`, `submit_delivery` and `quote_expired` are
+test-only hooks (they let tests simulate time without sleeping) and are
+documented as such in the code.
+
 ## Post-review fixes (Oct 27, 2026)
 
 Reviewed by ChatGPT and Claude (Grok's review was still running).
@@ -151,6 +185,12 @@ after the deadline; idempotent capture/void with reconciliation from
 PayPal's authorization state; `now=0` handling; per-job delivery lock
 (exactly-once); strict `create_job` input validation (400s, not 500s);
 no orphaned job when order creation fails. Tests grew 20 → 54.
+
+Round 2 (Grok's findings, same day): delivery-hash verification
+enforced in capture (the delivery text is required and checked before
+any PayPal call); durable job store (JSON file, restart round-trip
+tested); forged `now` never accepted from the request path. Tests
+grew 54 → 66.
 
 ## Layout
 
@@ -164,14 +204,17 @@ app/
                     on-chain LamplightEscrow contract
   hiring_agent.py   brief parsing, worker matching, delivery verification
   auth.py           demo-grade bearer auth for the mutating endpoints
+  store.py          pluggable job store: MemoryStore (tests) and
+                    JsonFileStore (server default, restart-proof)
   server.py         Flask service: /jobs, /jobs/<id>/authorize|deliver|
                     capture|void
 scripts/
   demo.py           full flows A (happy path) + B (timeout void); --mode mock|live
   mock_paypal.py    local mock PayPal sandbox (same REST surface)
-tests/              54 tests: receipts, quotes, escrow guards, client round
-                    trips, HTTP service, auth, idempotent recovery — all
-                    against the mock
+tests/              66 tests: receipts, quotes, escrow guards, client round
+                    trips, HTTP service, auth, idempotent recovery,
+                    delivery verification, durable store, forged-now —
+                    all against the mock
 demo-receipts/      quotes + receipts produced by the demo run
 docs/
   SUBMISSION.md     Devpost submission draft (not submitted)

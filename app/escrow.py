@@ -8,8 +8,12 @@ PayPal authorizations playing the role of the on-chain lock:
   QUOTED -> AUTHORIZED -> VOIDED                  (timeout: hold released)
 
 Rules (same spirit as the contract):
-  * capture requires DELIVERED and caller == payer
-  * void requires AUTHORIZED, NOT delivered, and now >= deadline
+  * capture requires DELIVERED and caller == payer, AND the original
+    delivery text, verified against the recorded hash before any
+    PayPal call — an unverified delivery can never release funds
+  * void requires AUTHORIZED, NOT delivered, and now >= deadline,
+    evaluated against wall-clock time (the ``now`` parameter is a
+    test-only hook; the server never passes a client-supplied time)
   * a settled job (CAPTURED or VOIDED) can never move again
   * deliver requires AUTHORIZED and caller == agent, exactly once,
     and only before the deadline
@@ -23,6 +27,8 @@ Rules (same spirit as the contract):
     fails, the job is reconciled from PayPal's actual authorization
     state before giving up, so money that moved is never left
     unrecorded
+  * jobs live in a pluggable store (app/store.py) and every state
+    change is saved, so a restart never loses a job or its PayPal ids
 """
 from __future__ import annotations
 
@@ -79,19 +85,95 @@ class Job:
             "settled_at": self.settled_at,
         }
 
+    def to_store_dict(self) -> dict:
+        """Full job state for the durable store (app/store.py). Unlike
+        to_dict() this keeps the whole quote, so a job loaded after a
+        restart still has its price, payee and expiry."""
+        return {
+            "job_id": self.job_id,
+            "quote": self.quote,
+            "payer": self.payer,
+            "agent": self.agent,
+            "created_at": self.created_at,
+            "deadline": self.deadline,
+            "status": self.status,
+            "order_id": self.order_id,
+            "authorization_id": self.authorization_id,
+            "capture_id": self.capture_id,
+            "delivery_hash": self.delivery_hash,
+            "settled_at": self.settled_at,
+            "capture_reconciled": self.capture_reconciled,
+        }
+
+    @classmethod
+    def from_store_dict(cls, data: dict) -> "Job":
+        """Rebuild a Job saved by to_store_dict()."""
+        job = cls(job_id=data["job_id"], quote=data["quote"],
+                  payer=data["payer"], agent=data["agent"],
+                  deadline_seconds=0)
+        job.created_at = data["created_at"]
+        job.deadline = data["deadline"]
+        job.status = data["status"]
+        job.order_id = data["order_id"]
+        job.authorization_id = data["authorization_id"]
+        job.capture_id = data["capture_id"]
+        job.delivery_hash = data["delivery_hash"]
+        job.settled_at = data["settled_at"]
+        job.capture_reconciled = data["capture_reconciled"]
+        return job
+
 
 class EscrowService:
-    """Owns jobs and drives the PayPal hold/release/void calls."""
+    """Owns jobs and drives the PayPal hold/release/void calls.
 
-    def __init__(self, paypal: PayPalClient):
+    Jobs live in a pluggable store (app/store.py): MemoryStore by
+    default (tests), JsonFileStore for the server, so jobs survive a
+    process restart. Every state change is saved to the store before
+    the method returns.
+
+    Delivery verification: capture() requires the original delivery
+    text and runs it through ``delivery_verifier`` (the hiring agent's
+    verify_delivery when the server wires it, a plain hash comparison
+    by default) BEFORE any PayPal call — funds can never be released
+    on a delivery whose hash was not checked against the work.
+    """
+
+    def __init__(self, paypal: PayPalClient, *, store=None,
+                 delivery_verifier=None):
         self.paypal = paypal
-        self.jobs: dict[str, Job] = {}
+        if store is None:
+            # Deferred import: app/store.py imports Job from this module.
+            from .store import MemoryStore
+            store = MemoryStore()
+        self.store = store
+        self.delivery_verifier = (
+            delivery_verifier if delivery_verifier is not None
+            else self._default_delivery_verifier)
         # One lock per job so delivery is exactly-once even if two
         # requests arrive at the same instant: the status check and the
         # state change happen inside the lock, so the second delivery
         # always sees DELIVERED and is refused.
         self._delivery_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+
+    @staticmethod
+    def _default_delivery_verifier(job: Job, delivery_text: str) -> bool:
+        """The delivery text hashes to the hash recorded on the job.
+        Same check as HiringAgent.verify_delivery, without needing a
+        hiring agent — used when no verifier is injected."""
+        return (hashlib.sha256(delivery_text.encode()).hexdigest()
+                == job.delivery_hash)
+
+    @property
+    def jobs(self) -> dict[str, Job]:
+        """Jobs by id, read from the store. Read-only view: mutate
+        through the store (save/delete), never through this dict."""
+        return {job.job_id: job for job in self.store.all()}
+
+    def _save(self, job: Job) -> None:
+        """Persist a job after a state change, so a restart never
+        loses work already done (or money already moved)."""
+        self.store.save(job)
 
     def _delivery_lock(self, job_id: str) -> threading.Lock:
         with self._locks_guard:
@@ -112,14 +194,14 @@ class EscrowService:
                    deadline_seconds: int = 3600) -> Job:
         job = Job(job_id=str(uuid.uuid4())[:8], quote=quote, payer=payer,
                   agent=agent, deadline_seconds=deadline_seconds)
-        self.jobs[job.job_id] = job
+        self.store.save(job)
         return job
 
     def get_job(self, job_id: str) -> Job:
-        try:
-            return self.jobs[job_id]
-        except KeyError:
+        job = self.store.get(job_id)
+        if job is None:
             raise EscrowError(f"job not found: {job_id}")
+        return job
 
     # -- hold ------------------------------------------------------------------
     def create_order(self, job: Job) -> dict:
@@ -138,9 +220,10 @@ class EscrowService:
                 custom_id=job.quote["quote_id"],
                 payee_email=job.quote.get("pay_to"))
         except PayPalError:
-            self.jobs.pop(job.job_id, None)
+            self.store.delete(job.job_id)
             raise
         job.order_id = order["id"]
+        self._save(job)
         return order
 
     def authorize(self, job: Job) -> dict:
@@ -174,6 +257,7 @@ class EscrowService:
                 f"authorization not created (status {auth.get('status')})")
         job.authorization_id = auth["id"]
         job.status = "AUTHORIZED"
+        self._save(job)
         return result
 
     # -- delivery --------------------------------------------------------------
@@ -181,7 +265,10 @@ class EscrowService:
                         now: int | None = None) -> str:
         """Worker agent marks delivery with a hash of the work. Exactly once,
         and only before the deadline — a delivery at or after the deadline
-        is refused, so it can never block the payer's void."""
+        is refused, so it can never block the payer's void.
+        ``now`` is a test-only hook (lets tests simulate the deadline
+        without sleeping); the server never passes it — production calls
+        always use wall-clock time."""
         with self._delivery_lock(job.job_id):
             if job.status != "AUTHORIZED":
                 raise EscrowError(f"cannot deliver in state {job.status}")
@@ -194,17 +281,27 @@ class EscrowService:
                 raise EscrowError("delivery deadline passed")
             job.delivery_hash = hashlib.sha256(delivery_text.encode()).hexdigest()
             job.status = "DELIVERED"
+            self._save(job)
             return job.delivery_hash
 
     # -- release ---------------------------------------------------------------
-    def capture(self, job: Job, *, payer: str) -> dict:
+    def capture(self, job: Job, *, payer: str, delivery_text: str) -> dict:
         """Release the held money to the worker agent. Payer only, delivered only.
-        Only settles on a COMPLETED capture — a DECLINED, PENDING or FAILED
-        result is refused, so the receipt never claims money that did not move."""
+        The original delivery text is required, and it is verified against
+        the hash recorded on the job (via delivery_verifier — the hiring
+        agent's verify_delivery when the server wires it) BEFORE any PayPal
+        call: a delivery whose hash was never checked can never release
+        funds, whatever the caller claims. Only settles on a COMPLETED
+        capture — a DECLINED, PENDING or FAILED result is refused, so the
+        receipt never claims money that did not move."""
         if job.status != "DELIVERED":
             raise EscrowError(f"cannot capture in state {job.status} (needs DELIVERED)")
         if payer != job.payer:
             raise EscrowError("only the payer can release this job")
+        if not delivery_text:
+            raise EscrowError("delivery text required for verification")
+        if not self.delivery_verifier(job, delivery_text):
+            raise EscrowError("delivery verification failed")
         request_id = self._request_id(job, "capture")
         try:
             result = self.paypal.capture_authorization(
@@ -217,6 +314,7 @@ class EscrowService:
         job.capture_id = result.get("id", "")
         job.status = "CAPTURED"
         job.settled_at = int(time.time())
+        self._save(job)
         return result
 
     def _capture_with_reconcile(self, job: Job, request_id: str) -> dict:
@@ -239,6 +337,7 @@ class EscrowService:
                 f"PayPal capture failed and state could not be reconciled: {e}")
         if auth.get("status") == "CAPTURED":
             job.capture_reconciled = True
+            self._save(job)
             return {"id": "", "status": "COMPLETED", "reconciled": True}
         raise EscrowError(
             f"PayPal capture failed; authorization is {auth.get('status')}")
@@ -246,7 +345,11 @@ class EscrowService:
     # -- timeout ---------------------------------------------------------------
     def void_after_deadline(self, job: Job, *, payer: str, now: int | None = None) -> dict:
         """Release the hold back to the payer when the worker never delivered
-        and the deadline has passed."""
+        and the deadline has passed.
+        ``now`` is a test-only hook (lets tests simulate the deadline
+        without sleeping); the server never passes it — production calls
+        always use wall-clock time, so no client can forge a future
+        timestamp and void before the real deadline."""
         if job.status != "AUTHORIZED":
             raise EscrowError(f"cannot void in state {job.status} (needs AUTHORIZED)")
         if payer != job.payer:
@@ -262,6 +365,7 @@ class EscrowService:
             result = self._void_with_reconcile(job, request_id)
         job.status = "VOIDED"
         job.settled_at = int(time.time())
+        self._save(job)
         return result
 
     def _void_with_reconcile(self, job: Job, request_id: str) -> dict:

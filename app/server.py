@@ -9,6 +9,8 @@ Env:   PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_BASE_URL (optional).
        LAMPLIGHT_PAYER_TOKEN, LAMPLIGHT_AGENT_TOKENS (optional): bearer
        tokens for the mutating endpoints — see app/auth.py. Demo
        defaults apply when unset; replace them for any real deployment.
+       LAMPLIGHT_JOBS_FILE (optional): where jobs are persisted —
+       default jobs.json in the project root (see app/store.py).
 
 Caller authentication (app/auth.py)
 ------------------------------------
@@ -27,12 +29,21 @@ Endpoints:
   GET  /jobs/<id>              job + receipt (once settled)
   POST /jobs/<id>/authorize    payer token: place the hold (buyer must approve first)
   POST /jobs/<id>/deliver      agent token: {agent, delivery_text} -> delivery hash
-  POST /jobs/<id>/capture      payer token: {payer} -> release held money to the agent
-  POST /jobs/<id>/void         payer token: {payer} -> release hold after deadline
+  POST /jobs/<id>/capture      payer token: {payer, delivery_text} -> verify the
+                               delivery hash, then release held money to the agent
+  POST /jobs/<id>/void         payer token: {payer} -> release hold after deadline.
+                               Any `now` field in the body is ignored — the
+                               deadline is always wall-clock time.
+
+Jobs are durable (app/store.py): the server keeps them in a JSON file
+(env LAMPLIGHT_JOBS_FILE, default jobs.json next to the server), so a
+restart never loses a job or its PayPal ids. The delivery text is
+verified on capture through the hiring agent's verify_delivery.
 """
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 
 from flask import Flask, jsonify, request
@@ -44,6 +55,9 @@ from app.escrow import EscrowError, EscrowService  # noqa: E402
 from app.hiring_agent import HiringAgent  # noqa: E402
 from app.paypal_client import PayPalClient, PayPalConfigError, PayPalError  # noqa: E402
 from app.receipt import build_receipt  # noqa: E402
+from app.store import JsonFileStore  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 app = Flask(__name__)
 hiring = HiringAgent()
@@ -53,12 +67,21 @@ def _paypal() -> PayPalClient:
     return PayPalClient()  # reads env vars; raises PayPalConfigError if unset
 
 
+def _jobs_file() -> pathlib.Path:
+    """Where jobs are persisted. Env override, else jobs.json in the
+    project root (gitignored — it holds live job state, not source)."""
+    override = os.environ.get("LAMPLIGHT_JOBS_FILE")
+    return pathlib.Path(override) if override else ROOT / "jobs.json"
+
+
 def _service() -> EscrowService:
-    return EscrowService(_paypal())
+    return EscrowService(_paypal(), store=JsonFileStore(_jobs_file()),
+                         delivery_verifier=hiring.verify_delivery)
 
 
-# One service instance per process would lose jobs on restart; for the demo
-# the store lives on the app object so the test client and server share it.
+# The service instance lives on the app object so the test client and
+# server share it — but the jobs themselves live in the durable store,
+# so a process restart (a fresh service on the same file) loses nothing.
 app.config.setdefault("escrow", None)
 
 
@@ -243,10 +266,17 @@ def capture_job(job_id):
     if claimed != payer_id:
         return jsonify({"error": "payer field does not match the bearer token"}), 403
     try:
+        delivery_text = _require_body_field(body, "delivery_text")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
         job = escrow().get_job(job_id)
         if job.payer != payer_id:
             return jsonify({"error": "only the payer can release this job"}), 403
-        escrow().capture(job, payer=payer_id)
+        # The delivery text is verified against the recorded hash inside
+        # capture() (via the hiring agent's verify_delivery) before any
+        # PayPal call — a capture with the wrong text is refused here.
+        escrow().capture(job, payer=payer_id, delivery_text=delivery_text)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
@@ -268,6 +298,10 @@ def void_job(job_id):
         job = escrow().get_job(job_id)
         if job.payer != payer_id:
             return jsonify({"error": "only the payer can void this job"}), 403
+        # Any `now` field in the body is ignored on purpose: the void
+        # deadline is always evaluated against wall-clock time, never a
+        # client-supplied timestamp (a forged future `now` must not be
+        # able to void before the real deadline).
         escrow().void_after_deadline(job, payer=payer_id)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409

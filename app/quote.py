@@ -49,6 +49,8 @@ def verify_quote_hash(quote: dict) -> bool:
 
 
 def quote_expired(quote: dict, now: int | None = None) -> bool:
+    """True if the quote's expiry has passed. ``now`` is a test-only
+    hook; production calls always use wall-clock time."""
     effective_now = now if now is not None else int(time.time())
     return effective_now > quote["expires_at"]
 

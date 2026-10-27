@@ -192,3 +192,68 @@ Use of Agentic Commerce** ($5,000).
   the worker). Grok's PayPal review may add a later fix round.
 - No personal details or secrets in any changed file (swept — see
   fix report). Demo tokens are labelled demo-only, env-overridable.
+
+## Round 2 fix — Grok's findings — Oct 27, 2026 ~5:16 PM CDT
+
+All three Grok findings fixed in source + tests (66/66 pass).
+Grok's Low (double-delivery race) was already fixed in round 1 by the
+per-job delivery lock — confirmed, not re-done.
+
+- Delivery-hash verification (Grok High): `app/escrow.py`
+  `capture(job, *, payer, delivery_text)` now requires the original
+  delivery text and runs it through `delivery_verifier` BEFORE any
+  PayPal call — missing text is refused, a hash mismatch is refused
+  ("delivery verification failed"), the job stays DELIVERED. The
+  server wires the hiring agent's `verify_delivery` as the verifier
+  (`EscrowService(..., delivery_verifier=hiring.verify_delivery)`);
+  the default (no verifier injected) is the same hash comparison.
+  `app/server.py` capture requires a `delivery_text` field (400 if
+  missing; the payer-field match is checked before it, so the 403
+  mismatch tests still behave). `scripts/demo.py` flow A passes the
+  delivery text through capture; flow B's guard does too (still
+  refused by the state check). Tests: empty text refused; wrong text
+  refused (job stays DELIVERED); injected verifier is what runs
+  (refusing verifier blocks, accepting verifier lets it through);
+  `verify_delivery` wired end-to-end; HTTP missing-text 400 and
+  wrong-text 409.
+- Durable job store (Grok Medium): new `app/store.py` — `MemoryStore`
+  (default, tests) and `JsonFileStore` (one JSON file, atomic rewrite
+  on every save, corrupt file fails loudly at startup). `Job` gained
+  `to_store_dict()` / `from_store_dict()` (full quote included, so a
+  reloaded job still has price, payee and expiry). `EscrowService`
+  takes `store=`; every state change is saved (`_save(job)` after
+  create/order/authorize/deliver/capture/reconcile/void); `jobs` is
+  now a read-only view over the store. Server defaults to
+  `jobs.json` in the project root (env `LAMPLIGHT_JOBS_FILE` to move
+  it; gitignored). Tests: restart round-trips — DELIVERED job
+  captures after restart (and the capture survives a second
+  restart), AUTHORIZED job voids after restart, QUOTED job keeps its
+  order id and authorizes after restart; corrupt file refused.
+  Single-process demo only — documented in the module (two processes
+  on one file would clobber each other).
+- Forged `now` (Grok Medium): the server never takes a timestamp from
+  the request path — `void_job` ignores any `now` in the body and
+  calls `void_after_deadline` without it, so the deadline is always
+  wall-clock time. The `now` params on `void_after_deadline`,
+  `submit_delivery` and `quote_expired` are documented test-only
+  hooks in their docstrings (round 1's `now if now is not None`
+  behavior kept). Tests: forged future `now` over HTTP does not void
+  early (409 "deadline not reached", job stays AUTHORIZED).
+- Tests: 54 -> 66, all passing (8.76s). New tests cover every path
+  above. Existing capture calls (escrow + server tests, demo) updated
+  to pass delivery_text.
+- Mock demo re-run: both flows pass; capture-before-delivery still
+  refused; printed output line-for-line the same shape as before
+  (same ORDER-0001/AUTH-0002/CAPTURE-0003 ids, same delivery hash
+  prefix ae337bcb…). Receipt keys unchanged. The v1 video is NOT
+  visibly stale. NOT pushed yet — Ellis verifies and pushes.
+- Still open: live sandbox re-run needed to prove payee routing
+  end-to-end (demo workers' @lamplight.example addresses are not real
+  PayPal accounts — a live run needs a real sandbox payee account for
+  the worker). No new live proof is needed for round 2 itself: the
+  verification, store and forged-now fixes are all provable offline
+  (mock + tests); the live run would only re-prove the same flows
+  with real sandbox accounts.
+- No personal details or secrets in any changed file (swept — the only
+  grep hits are pre-existing placeholders: PAYPAL_CLIENT_ID/SECRET=...
+  in README/.env.example and the documented demo-only token names).
