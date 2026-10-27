@@ -1,0 +1,68 @@
+"""Tests for the hash-stable quote and receipt modules."""
+import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from app.quote import new_quote, verify_quote_hash, quote_expired
+from app.receipt import build_receipt, verify_receipt_hash
+
+
+def _receipt(**overrides):
+    kw = dict(job_id="job1", quote_id="q1", service="audit",
+              payer="payer@example", agent="agent@example", currency="USD",
+              amount_cents=1250, network="PayPal Sandbox",
+              paypal_order_id="ORDER-0001", authorization_id="AUTH-0001",
+              outcome="released", delivery_hash="ab" * 32)
+    kw.update(overrides)
+    return build_receipt(**kw)
+
+
+def test_quote_hash_is_stable_and_verifies():
+    q = new_quote(service="audit", price_cents=1250, pay_to="a@example")
+    assert verify_quote_hash(q)
+    # Same inputs (minus nonce/uuid) can't be re-created identically, but the
+    # hash must verify against the quote's own contents.
+    assert q["quote_hash"].startswith("0x")
+
+
+def test_quote_tamper_detected():
+    q = new_quote(service="audit", price_cents=1250, pay_to="a@example")
+    q["price_cents"] = 999999
+    assert not verify_quote_hash(q)
+
+
+def test_quote_expiry():
+    q = new_quote(service="audit", price_cents=1250, pay_to="a@example",
+                  ttl_seconds=10)
+    assert not quote_expired(q, now=q["issued_at"] + 5)
+    assert quote_expired(q, now=q["issued_at"] + 11)
+
+
+def test_receipt_hash_is_stable_and_verifies():
+    r = _receipt()
+    assert verify_receipt_hash(r)
+    # Same inputs -> same hash (deterministic).
+    assert _receipt()["receipt_hash"] == r["receipt_hash"]
+
+
+def test_receipt_tamper_detected():
+    r = _receipt()
+    r["amount_cents"] = 1
+    assert not verify_receipt_hash(r)
+
+
+def test_receipt_voided_has_no_capture_id():
+    r = _receipt(outcome="voided", capture_id="")
+    assert r["capture_id"] == ""
+    assert verify_receipt_hash(r)
+
+
+def test_receipt_reconciled_capture_flagged():
+    """A capture recorded by reconciliation (response lost, capture id
+    unobserved) is flagged on the receipt instead of silently carrying
+    an empty capture id on a released receipt."""
+    r = _receipt(outcome="released", capture_id="", capture_reconciled=True)
+    assert r["capture_reconciled"] is True
+    assert verify_receipt_hash(r)
+    assert _receipt()["capture_reconciled"] is False

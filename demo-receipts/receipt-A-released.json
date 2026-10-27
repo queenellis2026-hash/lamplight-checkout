@@ -1,0 +1,19 @@
+{
+  "agent": "auditor-01@lamplight.example",
+  "amount_cents": 1250,
+  "authorization_id": "AUTH-0002",
+  "capture_id": "CAPTURE-0003",
+  "capture_reconciled": false,
+  "currency": "USD",
+  "delivery_hash": "ae337bcb5567803257910573c4332c06073adf6fbdc3168f906a3f5281a2107f",
+  "job_id": "4e6a0fbb",
+  "network": "PayPal Sandbox",
+  "outcome": "released",
+  "payer": "ellis@lamplight.example",
+  "paypal_order_id": "ORDER-0001",
+  "protocol": "lamplight-checkout/1",
+  "quote_id": "3bff9b18-85d8-4263-bd0c-6e3f5007e94e",
+  "receipt_hash": "0xf32a80ad0c3f1adbb00813b49a91cc00d44c260bb652b233feb485b7b1f78b80",
+  "service": "on-chain holder audit (top-20 wallets)",
+  "type": "settlement-receipt"
+}

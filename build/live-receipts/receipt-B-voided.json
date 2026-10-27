@@ -1,0 +1,18 @@
+{
+  "agent": "writer-02@lamplight.example",
+  "amount_cents": 800,
+  "authorization_id": "3N4686080K5931948",
+  "capture_id": "",
+  "currency": "USD",
+  "delivery_hash": "",
+  "job_id": "5bd2ef6e",
+  "network": "PayPal Sandbox",
+  "outcome": "voided",
+  "payer": "ellis@lamplight.example",
+  "paypal_order_id": "13A894540F527542B",
+  "protocol": "lamplight-checkout/1",
+  "quote_id": "84d56b34-808d-4b3e-a068-f26a12f878ec",
+  "receipt_hash": "0xa1c79ab029313d3b2786950c995d8ec2f81f0622bd87b2947d5ebe5d488e5d83",
+  "service": "research summary and write-up",
+  "type": "settlement-receipt"
+}

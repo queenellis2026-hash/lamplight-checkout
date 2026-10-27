@@ -1,0 +1,13 @@
+{
+  "currency": "USD",
+  "expires_at": 1793134998,
+  "issued_at": 1793131398,
+  "network": "PayPal Sandbox",
+  "nonce": "5d2e007749f84f28",
+  "pay_to": "writer-02@lamplight.example",
+  "price_cents": 800,
+  "protocol": "lamplight-checkout/1",
+  "quote_hash": "0xd483e61afbdf9ddc92917091ef6c0e7012a6ca1aafa9422dafa65b3deee5bf05",
+  "quote_id": "84d56b34-808d-4b3e-a068-f26a12f878ec",
+  "service": "research summary and write-up"
+}
