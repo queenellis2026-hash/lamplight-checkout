@@ -784,3 +784,136 @@ def test_old_store_file_without_capture_amount_loads(tmp_path):
     assert job.status == "CAPTURED"
     assert job.capture_id == "CAPTURE-OLD"
     assert job.capture_amount_cents is None
+
+# ---------------------------------------------------------------------------
+# Round 4 fixes (Oct 27, 2026): last PayPal response persisted on the job
+# (audit without re-querying PayPal), 404 vanished-authorization test.
+# Held: SQLite/Postgres store, partial capture, webhook listener.
+# ---------------------------------------------------------------------------
+
+def test_authorize_records_last_paypal_response(client):
+    """After authorize, the job carries the authorize response — the
+    envelope (operation + status + id + raw body), so an operator can
+    audit what PayPal said without re-querying it."""
+    svc, job = _approved_authorized_job(client)
+    record = job.last_paypal_response
+    assert record["operation"] == "authorize"
+    assert record["status"] == "CREATED"
+    assert record["id"] == job.authorization_id
+    auth = record["body"]["purchase_units"][0]["payments"]["authorizations"][0]
+    assert auth["id"] == job.authorization_id
+    assert auth["status"] == "CREATED"
+
+
+def test_capture_records_last_paypal_response(client):
+    """After capture, the last response is the capture result — the
+    record the receipt carries, so the release is auditable."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
+    record = job.last_paypal_response
+    assert record["operation"] == "capture"
+    assert record["status"] == "COMPLETED"
+    assert record["id"] == job.capture_id
+    assert record["body"]["amount"] == {"currency_code": "USD",
+                                        "value": "12.50"}
+    assert record["body"]["authorization_id"] == job.authorization_id
+
+
+def test_void_records_last_paypal_response(client):
+    """After void, the last response is the void record. The void call
+    returns no body (204), so the envelope's operation + status + id
+    are the audit trail — that is why the field is an envelope, not
+    the raw body alone."""
+    svc, job = _approved_authorized_job(client)
+    job.deadline = 0  # deadline already passed
+    svc.void_after_deadline(job, payer="payer@example")
+    record = job.last_paypal_response
+    assert record["operation"] == "void"
+    assert record["status"] == "VOIDED"
+    assert record["id"] == job.authorization_id
+    assert record["body"] == {}
+
+
+def test_reconcile_records_last_paypal_response():
+    """A reconcile read is itself a successful PayPal response: the
+    record is the authorization body (operation "reconcile"), whether
+    the job settles from it or stays pending."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    stub.auths["AUTH-STUB"]["status"] = "CAPTURED"
+    stub.auths["AUTH-STUB"]["captures"] = [{
+        "id": "CAPTURE-OUTSIDE", "status": "COMPLETED",
+        "amount": {"currency_code": "USD", "value": "12.50"},
+        "authorization_id": "AUTH-STUB"}]
+    svc.reconcile_open_jobs()
+    record = job.last_paypal_response
+    assert record["operation"] == "reconcile"
+    assert record["status"] == "CAPTURED"
+    assert record["id"] == "AUTH-STUB"
+    assert record["body"]["captures"][0]["id"] == "CAPTURE-OUTSIDE"
+
+    # A still-pending (CREATED) reconcile records the read too.
+    stub2 = _StubPayPal()
+    svc2, job2 = _stub_authorized_job(stub2)
+    svc2.reconcile_open_jobs()
+    record2 = job2.last_paypal_response
+    assert record2["operation"] == "reconcile"
+    assert record2["status"] == "CREATED"
+    assert record2["id"] == "AUTH-STUB"
+    assert job2.status == "AUTHORIZED"
+
+
+def test_failed_reconcile_keeps_last_good_response():
+    """A failed get_authorization never overwrites the last good
+    record: the job keeps its authorize response, stays AUTHORIZED,
+    and the error is reported instead."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    before = job.last_paypal_response
+    assert before["operation"] == "authorize"
+    stub.fail_get_authorization = True
+    summary = svc.reconcile_open_jobs()
+    assert summary["checked"] == 1
+    assert summary["still_pending"] == [job.job_id]
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["job_id"] == job.job_id
+    reloaded = svc.get_job(job.job_id)
+    assert reloaded.status == "AUTHORIZED"
+    assert reloaded.last_paypal_response == before
+
+
+def test_old_store_file_without_last_response_loads(tmp_path):
+    """A jobs.json written before round 4 (no last_paypal_response
+    field) still loads — the audit record is simply absent. And a job
+    that has one survives a JsonFileStore round trip intact."""
+    from app.store import JsonFileStore
+    import json
+
+    path = tmp_path / "jobs.json"
+    job_data = {
+        "job_id": "oldjob1",
+        "quote": {"quote_id": "q1", "service": "audit",
+                  "price_cents": 1250, "pay_to": "agent@example",
+                  "issued_at": 0, "expires_at": 10 ** 9,
+                  "quote_hash": "0x00"},
+        "payer": "payer@example", "agent": "agent@example",
+        "created_at": 0, "deadline": 10 ** 9, "status": "CAPTURED",
+        "order_id": "ORDER-OLD", "authorization_id": "AUTH-OLD",
+        "capture_id": "CAPTURE-OLD", "delivery_hash": "ab",
+        "settled_at": 1, "capture_reconciled": False,
+    }
+    path.write_text(json.dumps({"jobs": {"oldjob1": job_data}}))
+    store = JsonFileStore(path)
+    job = store.get("oldjob1")
+    assert job.capture_amount_cents is None
+    assert job.last_paypal_response is None
+
+    # Round trip: a recorded response survives save + reload.
+    job.last_paypal_response = {
+        "operation": "capture", "status": "COMPLETED", "id": "CAPTURE-OLD",
+        "body": {"id": "CAPTURE-OLD", "status": "COMPLETED"}}
+    store.save(job)
+    reloaded = JsonFileStore(path).get("oldjob1")
+    assert reloaded.last_paypal_response == job.last_paypal_response

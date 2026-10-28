@@ -36,8 +36,9 @@ authorization and the worker is paid. If the worker never delivers, the
 payer **voids** the authorization after the deadline and the hold is
 released back. Both sides keep a hash-stable settlement receipt — quote
 id, service, payer, agent, amount, PayPal order / authorization /
-capture ids, delivery hash, and a SHA-256 receipt hash either side can
-verify. Change one field and the hash stops matching.
+capture ids, delivery hash, the last PayPal response, and a SHA-256
+receipt hash either side can verify. Change one field and the hash stops
+matching.
 
 This is the Lamplight escrow design (previously built on-chain as
 Lamplight Pay) ported to PayPal: the authorization is the lock, capture

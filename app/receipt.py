@@ -20,7 +20,8 @@ def build_receipt(*, job_id: str, quote_id: str, service: str, payer: str,
                   authorization_id: str, capture_id: str = "",
                   capture_amount_cents: int | None = None,
                   outcome: str, delivery_hash: str = "",
-                  capture_reconciled: bool = False) -> dict:
+                  capture_reconciled: bool = False,
+                  last_paypal_response: dict | None = None) -> dict:
     receipt = {
         "protocol": PROTOCOL,
         "type": "settlement-receipt",
@@ -44,6 +45,12 @@ def build_receipt(*, job_id: str, quote_id: str, service: str, payer: str,
             # when the authorization lists a COMPLETED capture; it is ""
             # only when it lists none, so a reconciled receipt with a real
             # id is fully auditable against the merchant account.
+        "last_paypal_response": last_paypal_response,  # the last
+            # successful PayPal response on the job (envelope: operation
+            # + status + id + raw body), so the receipt is auditable
+            # without re-querying PayPal. None when no PayPal call has
+            # succeeded yet (a receipt is only built for settled jobs,
+            # so in practice it is the capture or void record).
         "outcome": outcome,           # "released" | "voided" | "cancelled"
         "delivery_hash": delivery_hash,
     }

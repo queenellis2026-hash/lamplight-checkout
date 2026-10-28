@@ -1,13 +1,13 @@
 {
   "currency": "USD",
-  "expires_at": 1793161470,
-  "issued_at": 1793157870,
+  "expires_at": 1793164244,
+  "issued_at": 1793160644,
   "network": "PayPal Sandbox",
-  "nonce": "17233854c3254c78",
+  "nonce": "df88154918604d88",
   "pay_to": "auditor-01@lamplight.example",
   "price_cents": 1250,
   "protocol": "lamplight-checkout/1",
-  "quote_hash": "0xb2d4880ae0e966ae2b340c617acb7b1e87cfa57631f079421bfe675438aa713d",
-  "quote_id": "f1388392-ceed-49dd-97eb-c658addb3754",
+  "quote_hash": "0xa99ca99eba9d8d796bfb40b8340f7440b0f7e68120ad5c04c94733266177e1c7",
+  "quote_id": "991833e8-3057-463c-80aa-52b873aaed62",
   "service": "on-chain holder audit (top-20 wallets)"
 }

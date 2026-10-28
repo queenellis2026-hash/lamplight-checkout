@@ -18,7 +18,8 @@ and pays through the PayPal sandbox with an escrow-style hold:
 Both sides keep a **hash-stable settlement receipt** (same design as
 Lamplight Pay's `lamplight-pay/1` receipts): quote id, service, payer,
 agent, amount, PayPal order / authorization / capture ids, delivery hash,
-and a SHA-256 `receipt_hash` either side can verify. Tamper with one field
+the last PayPal response (see "Audit trail" below), and a SHA-256
+`receipt_hash` either side can verify. Tamper with one field
 and the hash stops matching.
 
 Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/)
@@ -146,7 +147,25 @@ stays documented as unauditable. A capture is only settled on a
 `POST /admin/reconcile` (payer token) forces the same reconciliation
 for every open (AUTHORIZED/DELIVERED) job at once — for use after a
 prolonged outage. It returns a summary (checked / updated /
-still_pending / errors); one job's failure never stops the rest.
+still_pending / errors); one job's failure never stops the rest. A job
+whose authorization PayPal no longer knows (404, vanished
+authorization) is reported in `errors`, stays open, and is not
+mutated — the failed read never overwrites the job's last good
+PayPal response.
+
+## Audit trail: last PayPal response
+
+Every job persists the last successful PayPal response
+(`last_paypal_response`, visible on `GET /jobs/<id>` and carried on the
+settlement receipt): an envelope with the operation (`authorize` /
+`capture` / `void` / `reconcile`), the PayPal status, the PayPal id,
+and the raw response body — so an operator can audit what PayPal
+actually said without re-querying it. Only successful responses are
+recorded: a failed call (a dropped response, a 404 on reconcile)
+never overwrites the last good record. The void call returns no body
+(204), so the envelope — not the raw body alone — is the audit trail
+there: operation + status + id still say what happened. Store files
+written before round 4 load with the field absent (`None`).
 
 ## Delivery verification in capture (round 2)
 
@@ -225,6 +244,18 @@ the README and a startup warning naming the jobs file. The receipt
 gained `capture_amount_cents`. Held: SQLite/Postgres store, partial
 capture, webhook listener. Tests grew 66 → 87.
 
+Round 4 (Grok's round-3 re-review, same day — SOUND, "ship as a demo",
+no findings): every job now persists the **last successful PayPal
+response** (`last_paypal_response`: operation + status + id + raw body)
+at every authorize / capture / void and on every reconcile read, so an
+operator can audit without re-querying PayPal; a failed call never
+overwrites the last good record. The receipt carries the same field.
+New test pins the 404 case: an admin reconcile on a job whose
+authorization vanished reports the error and leaves the job byte-for-byte
+unchanged (mock gained a `/mock/forget-authorization/{id}` control).
+Held: SQLite/Postgres store, partial capture, webhook listener. Tests
+grew 87 → 96.
+
 ## Layout
 
 ```
@@ -244,11 +275,12 @@ app/
 scripts/
   demo.py           full flows A (happy path) + B (timeout void); --mode mock|live
   mock_paypal.py    local mock PayPal sandbox (same REST surface)
-tests/              87 tests: receipts, quotes, escrow guards, client round
+tests/              96 tests: receipts, quotes, escrow guards, client round
                     trips, HTTP service, auth, idempotent recovery,
                     delivery verification, durable store, forged-now,
                     reconcile (real capture id + amount, admin endpoint),
-                    single-process warning — all against the mock
+                    single-process warning, last PayPal response (audit
+                    trail, 404 vanished authorization) — all against the mock
 demo-receipts/      quotes + receipts produced by the demo run
 docs/
   SUBMISSION.md     Devpost submission draft (not submitted)

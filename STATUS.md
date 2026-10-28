@@ -322,3 +322,36 @@ round 3 was approved (full verbatim: reviews-2026-10-27.md).
 - Held: SQLite/Postgres store; partial capture + residual void;
   webhook listener. Live sandbox payee-routing proof still outstanding
   (needs a real sandbox payee account for the worker).
+
+## Round 4 — Oct 27, 2026 ~11:05 PM CDT (Grok's round-3 improvements)
+- Last PayPal response persisted on the job (`last_paypal_response`:
+  envelope with operation + status + id + raw body), recorded at
+  every authorize / capture / void and on every reconcile read, so an
+  operator can audit what PayPal said without re-querying it. Only
+  successful responses are recorded — a failed call never overwrites
+  the last good record. The void call returns no body (204), so the
+  envelope (not the raw body alone) is the audit trail there. The
+  receipt carries the same field; `GET /jobs/<id>` exposes it.
+- 404 vanished-authorization test pinned: an admin reconcile on a job
+  whose authorization PayPal no longer knows reports the error in the
+  summary and leaves the job byte-for-byte unchanged (same status,
+  same ids, same last response). Mock gained a
+  `/mock/forget-authorization/{id}` control (mock-only).
+- Tests: 87 -> 96, all passing (9.16s). New tests: authorize/capture/
+  void/reconcile recording; failed reconcile keeps the last good
+  response; old store file without the field still loads + round trip;
+  receipt carries the field (hash verifies); HTTP 404 admin test
+  (error reported, job unmutated); job view exposes the record.
+- Mock demo re-run: both flows pass, exit 0; printed output the same
+  shape as before (same ORDER-0001/AUTH-0002/CAPTURE-0003 ids, same
+  delivery hash prefix ae337bcb…). Receipts gained one field:
+  last_paypal_response (capture COMPLETED on the released receipt,
+  void VOIDED on the voided one); both hashes verify. The v1 video is
+  NOT visibly stale — the demo output form is unchanged (receipt
+  hashes are run-specific anyway). Video file untouched (md5
+  5eaee8564465f413d9c7c2734d31d3ca).
+- No personal details or secrets in any changed file (swept). Demo
+  tokens are pre-existing, labelled demo-only, env-overridable.
+- Held: SQLite/Postgres store; partial capture + residual void;
+  webhook listener. Live sandbox payee-routing proof still outstanding
+  (needs a real sandbox payee account for the worker).

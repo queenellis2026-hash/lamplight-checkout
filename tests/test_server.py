@@ -466,3 +466,67 @@ def test_single_process_warning_names_jobs_file(tmp_path):
     assert str(path) in warning
     assert "SINGLE-PROCESS ONLY" in warning
     assert "clobber" in warning
+
+# ---------------------------------------------------------------------------
+# Round 4 fixes (Oct 27, 2026): 404 vanished-authorization test, last
+# PayPal response persisted on the job (and on the receipt).
+# ---------------------------------------------------------------------------
+
+def test_admin_reconcile_vanished_authorization_reports_error(client):
+    """A job whose authorization PayPal no longer knows (404, vanished
+    authorization) is reported in the admin summary's errors — and the
+    job is NOT mutated: it stays AUTHORIZED, still pending, with the
+    same authorize record it had. One job's failure never stops the
+    rest, and a failed call never overwrites the last good response."""
+    body = _create_job(client)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    auth_id = _job_authorization_id(client, job_id)
+    before = client.get(f"/jobs/{job_id}").get_json()["job"]
+    assert before["status"] == "AUTHORIZED"
+    assert before["last_paypal_response"]["operation"] == "authorize"
+    # PayPal forgets the authorization (mock-only control).
+    r = requests.post(f"{BASE}/mock/forget-authorization/{auth_id}",
+                      timeout=10)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"forgotten": auth_id}
+    # And the mock really 404s on it now.
+    assert requests.get(f"{BASE}/v2/payments/authorizations/{auth_id}",
+                        timeout=10).status_code == 404
+
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    summary = r.get_json()
+    assert summary["checked"] == 1
+    assert summary["updated"] == []
+    assert summary["still_pending"] == [job_id]
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["job_id"] == job_id
+    assert "RESOURCE_NOT_FOUND" in summary["errors"][0]["error"]
+    # The job is byte-for-byte what it was: same status, same ids,
+    # same last PayPal response — the 404 changed nothing.
+    after = client.get(f"/jobs/{job_id}").get_json()["job"]
+    assert after == before
+
+
+def test_job_view_exposes_last_paypal_response(client):
+    """GET /jobs/<id> exposes the audit record: authorize after the
+    hold, capture after the release — so an operator can audit what
+    PayPal said without re-querying it."""
+    job_id = _delivered_job(client)
+    got = client.get(f"/jobs/{job_id}").get_json()["job"]
+    record = got["last_paypal_response"]
+    assert record["operation"] == "authorize"
+    assert record["status"] == "CREATED"
+    assert record["id"] == got["authorization_id"]
+    r = client.post(f"/jobs/{job_id}/capture",
+                    json={"payer": PAYER,
+                          "delivery_text": "audit report: top-20 holders"},
+                    headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    got = client.get(f"/jobs/{job_id}").get_json()
+    assert got["job"]["last_paypal_response"]["operation"] == "capture"
+    assert got["job"]["last_paypal_response"]["status"] == "COMPLETED"
+    assert got["job"]["last_paypal_response"]["id"] == got["job"]["capture_id"]
+    assert got["receipt"]["last_paypal_response"]["operation"] == "capture"
+    assert got["receipt"]["last_paypal_response"]["id"] == got["job"]["capture_id"]

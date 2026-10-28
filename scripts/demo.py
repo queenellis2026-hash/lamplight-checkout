@@ -91,7 +91,8 @@ def receipt_for(job, outcome: str) -> dict:
         paypal_order_id=job.order_id, authorization_id=job.authorization_id,
         capture_id=job.capture_id, capture_amount_cents=job.capture_amount_cents,
         outcome=outcome,
-        delivery_hash=job.delivery_hash)
+        delivery_hash=job.delivery_hash,
+        last_paypal_response=job.last_paypal_response)
 
 
 def flow_a(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, live: bool) -> None:

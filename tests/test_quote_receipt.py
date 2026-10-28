@@ -88,3 +88,20 @@ def test_receipt_reconciled_with_real_capture_id():
     assert r["capture_amount_cents"] == 1250
     assert r["capture_reconciled"] is True
     assert verify_receipt_hash(r)
+
+def test_receipt_carries_last_paypal_response():
+    """A settled receipt carries the last PayPal response, so it is
+    auditable without re-querying PayPal — and the hash still
+    verifies. Without one the field is None (receipts built before
+    round 4 have no audit record)."""
+    response = {"operation": "capture", "status": "COMPLETED",
+                "id": "CAPTURE-0003",
+                "body": {"id": "CAPTURE-0003", "status": "COMPLETED",
+                         "amount": {"currency_code": "USD",
+                                    "value": "12.50"}}}
+    r = _receipt(outcome="released", capture_id="CAPTURE-0003",
+                 capture_amount_cents=1250,
+                 last_paypal_response=response)
+    assert r["last_paypal_response"] == response
+    assert verify_receipt_hash(r)
+    assert _receipt()["last_paypal_response"] is None

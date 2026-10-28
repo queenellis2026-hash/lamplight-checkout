@@ -118,7 +118,8 @@ def _receipt_for(job) -> dict | None:
         capture_amount_cents=job.capture_amount_cents,
         outcome="released" if job.status == "CAPTURED" else "voided",
         delivery_hash=job.delivery_hash,
-        capture_reconciled=job.capture_reconciled)
+        capture_reconciled=job.capture_reconciled,
+        last_paypal_response=job.last_paypal_response)
 
 
 @app.errorhandler(AuthError)

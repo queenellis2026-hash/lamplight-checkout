@@ -32,6 +32,11 @@ Rules (same spirit as the contract):
     reconciled flag, documented as unauditable)
   * jobs live in a pluggable store (app/store.py) and every state
     change is saved, so a restart never loses a job or its PayPal ids
+  * the last successful PayPal response is persisted on the job
+    (last_paypal_response) at every authorize / capture / void and on
+    every reconcile read, so an operator can audit what PayPal said
+    without re-querying it; a failed call never overwrites the last
+    good record
   * POST /admin/reconcile (server.py) walks open jobs and forces the
     same reconciliation from PayPal, for use after a prolonged outage
 """
@@ -79,6 +84,20 @@ class Job:
         # "" only when it lists none — that case stays unauditable.
         self.capture_reconciled: bool = False
 
+        # The last successful PayPal response, so an operator can audit
+        # what PayPal actually said without re-querying it. Envelope
+        # (not the raw body alone): the void call returns no body, so
+        # the raw body alone would say nothing — the envelope always
+        # carries at least operation + status + id, plus the raw body
+        # for the full audit. Only successful responses are recorded;
+        # a failed call never overwrites the last good record.
+        # {"operation": "authorize"|"capture"|"void"|"reconcile",
+        #  "status": "CREATED"|"COMPLETED"|"VOIDED"|..., "id": <PayPal id>,
+        #  "body": <raw PayPal response dict>}. None until the first
+        # PayPal call succeeds (store files written before round 4
+        # load with None via .get()).
+        self.last_paypal_response: dict | None = None
+
     def to_dict(self) -> dict:
         return {
             "job_id": self.job_id,
@@ -98,6 +117,7 @@ class Job:
             "capture_reconciled": self.capture_reconciled,
             "delivery_hash": self.delivery_hash,
             "settled_at": self.settled_at,
+            "last_paypal_response": self.last_paypal_response,
         }
 
     def to_store_dict(self) -> dict:
@@ -119,6 +139,7 @@ class Job:
             "delivery_hash": self.delivery_hash,
             "settled_at": self.settled_at,
             "capture_reconciled": self.capture_reconciled,
+            "last_paypal_response": self.last_paypal_response,
         }
 
     @classmethod
@@ -139,6 +160,9 @@ class Job:
         job.delivery_hash = data["delivery_hash"]
         job.settled_at = data["settled_at"]
         job.capture_reconciled = data["capture_reconciled"]
+        # .get(): store files written before round 4 have no
+        # last_paypal_response — they still load, with no audit record.
+        job.last_paypal_response = data.get("last_paypal_response")
         return job
 
 
@@ -276,6 +300,9 @@ class EscrowService:
                 f"authorization not created (status {auth.get('status')})")
         job.authorization_id = auth["id"]
         job.status = "AUTHORIZED"
+        self._record_paypal_response(job, operation="authorize",
+                                     status=auth.get("status"),
+                                     id_=auth.get("id"), body=result)
         self._save(job)
         return result
 
@@ -332,10 +359,35 @@ class EscrowService:
                 f"capture not completed (status {result.get('status')})")
         job.capture_id = result.get("id", "")
         self._record_capture_amount(job, result)
+        # The capture result is the last PayPal response that settled
+        # this job — including the reconciled case, where the result is
+        # the synthetic COMPLETED dict from _capture_with_reconcile
+        # (its body carries "reconciled": True).
+        self._record_paypal_response(job, operation="capture",
+                                     status=result.get("status"),
+                                     id_=result.get("id"), body=result)
         job.status = "CAPTURED"
         job.settled_at = int(time.time())
         self._save(job)
         return result
+
+    @staticmethod
+    def _record_paypal_response(job: Job, *, operation: str, status,
+                                id_, body) -> None:
+        """Persist the last successful PayPal response on the job (see
+        Job.last_paypal_response). Call this where a PayPal call's
+        successful result is accepted as the basis for a state change:
+        authorize / capture / void, and the reconcile path's
+        get_authorization results. Only successful responses are
+        recorded — a failed call never overwrites the last good record,
+        so a job whose reconcile 404s keeps the authorize record it
+        already had."""
+        job.last_paypal_response = {
+            "operation": operation,
+            "status": status if isinstance(status, str) else "",
+            "id": id_ if isinstance(id_, str) else "",
+            "body": body if isinstance(body, dict) else {},
+        }
 
     @staticmethod
     def _record_capture_amount(job: Job, capture_like: dict) -> None:
@@ -363,6 +415,13 @@ class EscrowService:
         if cap is not None:
             job.capture_id = cap.get("id", "")
             self._record_capture_amount(job, cap)
+        # The authorization body is the last PayPal response that
+        # proved the capture. In the capture path capture() overwrites
+        # this with the capture result afterwards; in the reconcile path
+        # this record stands.
+        self._record_paypal_response(job, operation="reconcile",
+                                     status=auth.get("status"),
+                                     id_=auth.get("id"), body=auth)
 
     def _capture_with_reconcile(self, job: Job, request_id: str) -> dict:
         """The capture call failed — but it may have executed server-side
@@ -419,6 +478,14 @@ class EscrowService:
                     "capture_id": job.capture_id, "error": str(e)}
         status = auth.get("status")
         if status == "CREATED":
+            # The hold is still there — no state change, but the
+            # get_authorization result is still the last successful
+            # PayPal response, so record it (and save: the record must
+            # survive a restart, not just live in memory).
+            self._record_paypal_response(job, operation="reconcile",
+                                         status=status, id_=auth.get("id"),
+                                         body=auth)
+            self._save(job)
             return {"job_id": job.job_id, "from_status": from_status,
                     "to_status": job.status, "updated": False,
                     "capture_id": job.capture_id, "error": ""}
@@ -431,6 +498,9 @@ class EscrowService:
                     "to_status": "CAPTURED", "updated": True,
                     "capture_id": job.capture_id, "error": ""}
         if status == "VOIDED":
+            self._record_paypal_response(job, operation="reconcile",
+                                         status=status, id_=auth.get("id"),
+                                         body=auth)
             job.status = "VOIDED"
             job.settled_at = int(time.time())
             self._save(job)
@@ -493,6 +563,16 @@ class EscrowService:
                 job.authorization_id, request_id=request_id)
         except PayPalError:
             result = self._void_with_reconcile(job, request_id)
+        # The void result is the last PayPal response that settled this
+        # job. Its body is normally {} (PayPal's void returns 204), so
+        # the envelope's operation + status + id are the audit trail —
+        # that is why the field is an envelope, not the raw body alone.
+        # (In the reconcile path the get_authorization fetch is an
+        # internal confirmation step, not the settling response, so it
+        # is not recorded separately here — the void record stands.)
+        self._record_paypal_response(job, operation="void",
+                                     status="VOIDED",
+                                     id_=job.authorization_id, body=result)
         job.status = "VOIDED"
         job.settled_at = int(time.time())
         self._save(job)

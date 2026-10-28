@@ -37,6 +37,11 @@ Test controls (MOCK ONLY — not part of PayPal's API):
       capture / void applies server-side (and is stored under its
       PayPal-Request-Id) but the HTTP response is dropped, simulating
       a lost response. The client must recover via idempotent retry.
+  POST /mock/forget-authorization/{id} — delete an authorization from
+      the mock's state, so GET authorization returns 404 — as if
+      PayPal no longer knew it (vanished authorization). Lets tests
+      prove the admin reconcile reports the error without mutating
+      the job. Returns 404 when the id was already unknown.
 
 Idempotency: the mock stores every authorize/capture/void result under
 its PayPal-Request-Id header and replays the stored result when the
@@ -309,6 +314,20 @@ def void_authorization(auth_id):
 
 
 # -- mock-only test controls ---------------------------------------------------
+@app.route("/mock/forget-authorization/<auth_id>", methods=["POST"])
+def forget_authorization(auth_id):
+    """MOCK ONLY: delete an authorization from the mock's state, so a
+    later GET returns 404 — the authorization vanished from PayPal's
+    side. Lets tests prove the admin reconcile reports the error
+    without mutating the job (and one job's failure never stops the
+    rest)."""
+    if auth_id not in _auths:
+        return jsonify({"name": "RESOURCE_NOT_FOUND",
+                        "message": f"authorization {auth_id} not found"}), 404
+    del _auths[auth_id]
+    return jsonify({"forgotten": auth_id})
+
+
 @app.route("/mock/next-capture-status", methods=["POST"])
 def set_next_capture_status():
     global _next_capture_status
