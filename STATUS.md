@@ -115,13 +115,13 @@ Use of Agentic Commerce** ($5,000).
 
 ## Demo video + YouTube — LIVE Oct 27, 2026 ~3:21 PM CDT
 - Video: build/demo-video-v1.mp4, 2:27 (146.97s), 1280x720, 30fps, H.264 + AAC, 3,832,669 bytes, md5 5eaee8564465f413d9c7c2734d31d3ca. Narration 306 words, gTTS US English. Follows docs/VIDEO-SCRIPT.md shot by shot; mock run (ORDER-0001/AUTH-0002/CAPTURE-0003) + live-proof frame (flow A 2S552376TD187702C $12.50 CAPTURED, flow B 13A894540F527542B $8.00 VOIDED). Only URL on screen is the real one: checkoutnow?token=2S552376TD187702C — no redacted token anywhere. Verified by the builder (9 frames) + Ellis (ffprobe + md5 + receipts).
-- YouTube: PUBLIC on the Ellis channel (@EllisLamplight) at https://youtu.be/dT5ytBU4gb8. Title "Lamplight Checkout — escrow-style agent hiring on PayPal (PayPal AI Hackathon)". Copyright check clean, "not made for kids".
+- YouTube: PUBLIC on the Ellis channel (@EllisLamplight) — v1 video (superseded by v2, see "Demo video v2" below). Title "Lamplight Checkout — escrow-style agent hiring on PayPal (PayPal AI Hackathon)". Copyright check clean, "not made for kids".
 - SUBMISSION.md links filled in (repo + video). Devpost submit still needs the owner's final check.
 
 ## Devpost SUBMITTED — Oct 27, 2026 ~3:49 PM CDT
 - Project: https://devpost.com/software/lamplight-checkout-escrow-for-ai-agents-on-paypal — Submission ID 1268309, submitted Oct 27, 2026 by Ellis Lamplight (queenellis2026@gmail.com), solo.
 - Status: Submitted. Banner: "Project submitted! Continue to edit your project until the hackathon deadline: November 12, 2026 at 03:00pm EST." Sidebar reads "SUBMITTED TO — PayPal AI Hackathon".
-- Verified on the public page: title + exact tagline, full story text verbatim (description, How we built it, What we learned, What's next, Tools used), repo link under "Try it out", demo video embedded (YouTube, https://youtu.be/dT5ytBU4gb8), Built With tags (paypal-developer-platform, Python, Flask, requests, pytest, Orders-API-v2, Payments-API, Sandbox), Additional info as answered (Individual, United States, Existing + Lamplight Pay explanation, PayPal rating 8/10 + feedback, sponsor tools "None, used other AI tools.", repo/demo URLs, testing instructions, learning Significant, career AI value Yes, all eligibility checkboxes ticked).
+- Verified on the public page: title + exact tagline, full story text verbatim (description, How we built it, What we learned, What's next, Tools used), repo link under "Try it out", demo video embedded (YouTube, https://youtu.be/OaY6a8B304I — v2, swapped Oct 27, 2026 ~11:33 PM CDT; v1 was embedded before), Built With tags (paypal-developer-platform, Python, Flask, requests, pytest, Orders-API-v2, Payments-API, Sandbox), Additional info as answered (Individual, United States, Existing + Lamplight Pay explanation, PayPal rating 8/10 + feedback, sponsor tools "None, used other AI tools.", repo/demo URLs, testing instructions, learning Significant, career AI value Yes, all eligibility checkboxes ticked).
 - FLAG — category: the Devpost form never offered a category/prize selection at any step (no "Best Use of Agentic Commerce ($5,000)" option). Submitted as-is; eligible for the hackathon's prizes as the organizers judge them. Editable until Nov 12 if a category step appears.
 - Sign-in note: the saved Devpost email+password was REJECTED ("Invalid Email or password") — signed in via "Log in with Google" (Ellis / queenellis2026@gmail.com) instead. The vault's Devpost password is wrong/outdated; Google sign-in is the working route.
 - A reCAPTCHA (cars grid) was cleared during the flow. Nothing else outstanding — submission complete.
@@ -355,3 +355,39 @@ round 3 was approved (full verbatim: reviews-2026-10-27.md).
 - Held: SQLite/Postgres store; partial capture + residual void;
   webhook listener. Live sandbox payee-routing proof still outstanding
   (needs a real sandbox payee account for the worker).
+
+## Demo video v2 — Oct 28, 2026 (re-rendered for round-4 code)
+- File: build/demo-video-v2.mp4 — 2:35 (155.17s), 1280x720, 30fps,
+  H.264 + AAC, 4,110,001 bytes, md5 8c4bcce01766c543b899d64a1c7f7772.
+  Builder: scripts/make_demo_video_v2.py (v1 script copied, then
+  edited — the live approve URL is built from the real order id,
+  never from redacted tool output). Narration:
+  build/demo-video-v2-narration.txt (323 words, gTTS US English,
+  same plain honest voice).
+- Test count corrected: "Ninety-six tests, all passing" (verified 96
+  passed in 9.95s) in the receipts narration and the tree narration;
+  tree frame reads "3 files — 96 tests, all passing".
+- Receipt frame: fresh mock demo re-run (both flows pass, exit 0) —
+  receipt-A JSON on screen now includes last_paypal_response
+  {"operation": "capture", "status": "COMPLETED", "id":
+  "CAPTURE-0003"} and the fresh receipt_hash 0xc19f8bfd…
+  (run-specific). Narration adds one clause: the receipt carries the
+  last PayPal response so the settlement can be audited without
+  asking PayPal again.
+- Live-proof frame unchanged (historical Oct 27 live run): flow A
+  2S552376TD187702C $12.50 CAPTURED, flow B 13A894540F527542B $8.00
+  VOIDED; the only URL on screen is the real approve URL
+  (checkoutnow?token=2S552376TD187702C) — no redacted token anywhere.
+- Verified by frame inspection: receipt frame (100s), live frame
+  (132s), tree frame (122s), demo frame (60s), closing frame (152s)
+  — no stale numbers; no "twenty"/"20 tests" anywhere in the v2
+  narration or script (only the "top twenty holders" service name,
+  which is the job description). docs/VIDEO-SCRIPT.md updated to v2
+  (shot times, receipts narration, 323 words).
+- v1 untouched as the record (md5 5eaee8564465f413d9c7c2734d31d3ca).
+- Uploaded to YouTube as Public on the Ellis channel (@EllisLamplight)
+  at https://youtu.be/OaY6a8B304I (2:35). Copyright check clean,
+  "not made for kids". v1 remains live as the historical record.
+- Devpost swap: submission 1268309 now embeds v2 — verified on the
+  public page Oct 27, 2026 ~11:33 PM CDT. SUBMISSION.md links updated
+  to v2 and pushed to the repo.

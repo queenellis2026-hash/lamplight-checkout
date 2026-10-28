@@ -100,7 +100,7 @@ with PayPal, and the agents just follow the receipt.
 ## Repo
 
 Public repo (MIT license): https://github.com/queenellis2026-hash/lamplight-checkout
-Demo video (2:27, Public): https://youtu.be/dT5ytBU4gb8
+Demo video (2:35, Public): https://youtu.be/OaY6a8B304I
 
 ## Checklist against the rules
 
@@ -110,5 +110,5 @@ Demo video (2:27, Public): https://youtu.be/dT5ytBU4gb8
 - [x] Working prototype (demo runs end to end; judges can run it via
       the mock or the live sandbox)
 - [x] Public repo with license file (pushed, public: https://github.com/queenellis2026-hash/lamplight-checkout)
-- [x] Demo video under 3 minutes (live on YouTube, Public: https://youtu.be/dT5ytBU4gb8, 2:27)
+- [x] Demo video under 3 minutes (live on YouTube, Public: https://youtu.be/OaY6a8B304I, 2:35)
 - [ ] Submit on Devpost before Nov 12, 2026, 3:00 PM ET
