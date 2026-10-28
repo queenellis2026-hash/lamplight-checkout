@@ -509,6 +509,42 @@ def test_admin_reconcile_vanished_authorization_reports_error(client):
     assert after == before
 
 
+def test_admin_reconcile_vanished_authorization_reports_error_for_delivered(client):
+    """Same vanished-authorization guarantee for a DELIVERED job: the
+    admin summary reports RESOURCE_NOT_FOUND and the job is
+    byte-for-byte unchanged — DELIVERED, same delivery hash, same
+    authorize record. Both open states are pinned against
+    mutation-on-error (round 5)."""
+    job_id = _delivered_job(client)
+    auth_id = _job_authorization_id(client, job_id)
+    before = client.get(f"/jobs/{job_id}").get_json()["job"]
+    assert before["status"] == "DELIVERED"
+    assert before["delivery_hash"]
+    assert before["last_paypal_response"]["operation"] == "authorize"
+    # PayPal forgets the authorization (mock-only control).
+    r = requests.post(f"{BASE}/mock/forget-authorization/{auth_id}",
+                      timeout=10)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"forgotten": auth_id}
+    # And the mock really 404s on it now.
+    assert requests.get(f"{BASE}/v2/payments/authorizations/{auth_id}",
+                        timeout=10).status_code == 404
+
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    summary = r.get_json()
+    assert summary["checked"] == 1
+    assert summary["updated"] == []
+    assert summary["still_pending"] == [job_id]
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["job_id"] == job_id
+    assert "RESOURCE_NOT_FOUND" in summary["errors"][0]["error"]
+    # The job is byte-for-byte what it was: same status, same delivery
+    # hash, same last PayPal response — the 404 changed nothing.
+    after = client.get(f"/jobs/{job_id}").get_json()["job"]
+    assert after == before
+
+
 def test_job_view_exposes_last_paypal_response(client):
     """GET /jobs/<id> exposes the audit record: authorize after the
     hold, capture after the release — so an operator can audit what

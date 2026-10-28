@@ -391,3 +391,49 @@ round 3 was approved (full verbatim: reviews-2026-10-27.md).
 - Devpost swap: submission 1268309 now embeds v2 — verified on the
   public page Oct 27, 2026 ~11:33 PM CDT. SUBMISSION.md links updated
   to v2 and pushed to the repo.
+
+## Round 5 — Oct 28, 2026 (Grok's round-4 improvements)
+- Envelope size/shape guard (`_trim_paypal_body` in app/escrow.py):
+  the recorded response body is capped at 4 KB (ENVELOPE_BODY_MAX_BYTES).
+  The guard is size-driven, not shape-driven — a normal response (a few
+  hundred bytes) records fully and unchanged; only an oversized body is
+  trimmed, deterministically: links array cut to its first entry, long
+  strings truncated to 512 chars, lists cut to 8 items, nesting capped
+  at depth 6, and if still over the cap the largest top-level keys are
+  dropped first. As a last resort the body is replaced by a marker
+  naming the keys it had. The guard never raises: unserializable
+  values and circular references degrade to {"_trimmed": True}, and a
+  non-dict body records as {}. Applied in the one choke point
+  (_record_paypal_response), so every record path gets it.
+- Shared reconcile helper: `_record_reconcile_read(job, auth)` is now
+  the one place the "always persist a successful read" rule lives —
+  all three reconcile branches (CREATED, CAPTURED, VOIDED) end there.
+  `_record_captured_authorization` is capture bookkeeping only now
+  (reconciled flag + real id/amount); in the capture path capture()
+  still records the capture result afterwards, so the final record is
+  unchanged. reconcile_job restructured to a single tail; return
+  shapes identical to round 4.
+- Vanished-authorization test extended to DELIVERED: an admin
+  reconcile on a delivered job whose authorization vanished reports
+  RESOURCE_NOT_FOUND and leaves the job byte-for-byte unchanged
+  (DELIVERED, same delivery hash, same authorize record) — HTTP test
+  plus a service-level test. Both open states are now pinned against
+  mutation-on-error.
+- Tests: 96 -> 104, all passing (9.34s). New tests: guard keeps a
+  normal response unchanged; huge links array trimmed to one entry;
+  oversized nested object trimmed; largest keys dropped when still
+  oversized; pathological bodies never raise; all three reconcile
+  reads survive a store reload; failed reconcile keeps a DELIVERED
+  job untouched (service level); HTTP vanished-auth test for
+  DELIVERED.
+- Mock demo re-run: both flows pass, exit 0; receipt fields identical
+  to round 4 (19 keys each, no new receipt field — round 5 adds none).
+  The v2 video is HELD until the upgrades are done, per Chris — no
+  re-render, no narration change, no upload. The v2 narration's
+  "Ninety-six tests" line is now stale (104) and will be corrected
+  when the video is un-held.
+- No personal details or secrets in any changed file (swept). Demo
+  tokens are pre-existing, labelled demo-only, env-overridable.
+- Held: SQLite/Postgres store; partial capture + residual void;
+  webhook listener. Live sandbox payee-routing proof still outstanding
+  (needs a real sandbox payee account for the worker).

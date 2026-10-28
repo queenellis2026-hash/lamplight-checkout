@@ -7,7 +7,7 @@
   "capture_reconciled": false,
   "currency": "USD",
   "delivery_hash": "",
-  "job_id": "acb5efa3",
+  "job_id": "f1f14ed2",
   "last_paypal_response": {
     "body": {},
     "id": "AUTH-0005",
@@ -19,8 +19,8 @@
   "payer": "ellis@lamplight.example",
   "paypal_order_id": "ORDER-0004",
   "protocol": "lamplight-checkout/1",
-  "quote_id": "13e68de6-deb5-4dc5-b24d-111fddd34c77",
-  "receipt_hash": "0x172cfe546a7eeaf5f04799fb6df6882ecfe1108df9bd667217fa369ab0ffad79",
+  "quote_id": "caf7a878-5b2d-48a3-8f32-e4fea97676e7",
+  "receipt_hash": "0x6ce609f9adcbe4203cb90aa25698d5dfea0745826bafd50630d72398b5f3d253",
   "service": "research summary and write-up",
   "type": "settlement-receipt"
 }

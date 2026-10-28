@@ -11,7 +11,7 @@ import requests
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from app.escrow import EscrowService, EscrowError
+from app.escrow import EscrowService, EscrowError, Job
 from app.hiring_agent import HiringAgent
 from app.paypal_client import PayPalClient, PayPalError
 from app.quote import new_quote
@@ -917,3 +917,189 @@ def test_old_store_file_without_last_response_loads(tmp_path):
     store.save(job)
     reloaded = JsonFileStore(path).get("oldjob1")
     assert reloaded.last_paypal_response == job.last_paypal_response
+
+# ---------------------------------------------------------------------------
+# Round 5 fixes (Oct 27, 2026): size/shape guard on the recorded PayPal
+# response envelope; one shared record+save helper for reconcile reads;
+# vanished-authorization test for DELIVERED jobs. Held: SQLite/Postgres
+# store, partial capture, webhook listener.
+# ---------------------------------------------------------------------------
+
+def _guard_job():
+    """A bare Job for calling _record_paypal_response directly."""
+    return Job(job_id="guard1", quote=_quote(), payer="payer@example",
+               agent="agent@example")
+
+
+def test_guard_keeps_normal_response_unchanged():
+    """A normal PayPal response — ids, status, amount, captures list,
+    a couple of links — records fully and unchanged. The guard is
+    size-driven: it only trims when the body is over the cap."""
+    job = _guard_job()
+    body = {
+        "id": "AUTH-1", "status": "CREATED",
+        "purchase_units": [{"payments": {"authorizations": [
+            {"id": "AUTH-1", "status": "CREATED"}]}}],
+        "links": [{"href": "https://example/approve", "rel": "approve",
+                   "method": "GET"},
+                  {"href": "https://example/self", "rel": "self",
+                   "method": "GET"}],
+    }
+    EscrowService._record_paypal_response(job, operation="authorize",
+                                          status="CREATED", id_="AUTH-1",
+                                          body=body)
+    assert job.last_paypal_response["body"] == body
+
+
+def test_guard_trims_huge_links_array():
+    """A response with a huge links array records trimmed: the links
+    array is cut to its first entry, the audit fields (id, status,
+    amount) survive, and the recorded body fits the cap."""
+    import json
+
+    job = _guard_job()
+    body = {
+        "id": "AUTH-1", "status": "CREATED",
+        "amount": {"currency_code": "USD", "value": "12.50"},
+        "links": [{"href": f"https://example/payments/{i:04d}",
+                   "rel": "self", "method": "GET"} for i in range(100)],
+    }
+    assert len(json.dumps(body).encode()) > 4096  # the test is really over the cap
+    EscrowService._record_paypal_response(job, operation="authorize",
+                                          status="CREATED", id_="AUTH-1",
+                                          body=body)
+    recorded = job.last_paypal_response["body"]
+    assert len(recorded["links"]) == 1
+    assert recorded["links"][0]["href"] == "https://example/payments/0000"
+    assert recorded["id"] == "AUTH-1"
+    assert recorded["status"] == "CREATED"
+    assert recorded["amount"] == {"currency_code": "USD", "value": "12.50"}
+    assert len(json.dumps(recorded).encode()) <= 4096
+
+
+def test_guard_trims_oversized_nested_object():
+    """A response with an oversized nested object records trimmed:
+    long strings are cut, the audit fields survive, and the recorded
+    body fits the cap."""
+    import json
+
+    job = _guard_job()
+    body = {
+        "id": "CAP-1", "status": "COMPLETED",
+        "amount": {"currency_code": "USD", "value": "12.50"},
+        "details": {"note": "x" * 10000,
+                    "nested": {"deep": "y" * 5000}},
+    }
+    EscrowService._record_paypal_response(job, operation="capture",
+                                          status="COMPLETED", id_="CAP-1",
+                                          body=body)
+    recorded = job.last_paypal_response["body"]
+    assert recorded["id"] == "CAP-1"
+    assert recorded["status"] == "COMPLETED"
+    assert recorded["amount"] == {"currency_code": "USD", "value": "12.50"}
+    assert len(recorded["details"]["note"]) <= 512
+    assert len(recorded["details"]["nested"]["deep"]) <= 512
+    assert len(json.dumps(recorded).encode()) <= 4096
+
+
+def test_guard_drops_largest_keys_when_still_oversized():
+    """When trimming alone is not enough, the largest top-level keys
+    are dropped first (deterministic order) until the body fits — the
+    small audit keys survive, and the recorded body fits the cap."""
+    import json
+
+    job = _guard_job()
+    body = {"id": "AUTH-1", "status": "CREATED"}
+    for i in range(20):
+        body[f"blob_{i:02d}"] = "z" * 500
+    EscrowService._record_paypal_response(job, operation="authorize",
+                                          status="CREATED", id_="AUTH-1",
+                                          body=body)
+    recorded = job.last_paypal_response["body"]
+    assert recorded["id"] == "AUTH-1"
+    assert recorded["status"] == "CREATED"
+    assert len(recorded) < len(body)  # some keys were dropped
+    assert len(json.dumps(recorded).encode()) <= 4096
+
+
+def test_guard_never_raises_on_pathological_body():
+    """A pathological body degrades to a trimmed record, never an
+    exception — a bad audit record must never break a settlement.
+    Unserializable values and circular references both land on the
+    marker; a non-dict body records as an empty body."""
+    job = _guard_job()
+    # A set is not JSON-serializable.
+    EscrowService._record_paypal_response(
+        job, operation="authorize", status="CREATED", id_="AUTH-1",
+        body={"id": "AUTH-1", "weird": {1, 2, 3}})
+    assert job.last_paypal_response["body"] == {"_trimmed": True}
+    # A circular reference.
+    circular = {"id": "AUTH-1"}
+    circular["self"] = circular
+    EscrowService._record_paypal_response(
+        job, operation="authorize", status="CREATED", id_="AUTH-1",
+        body=circular)
+    assert job.last_paypal_response["body"] == {"_trimmed": True}
+    # A non-dict body records as an empty body (never raises).
+    EscrowService._record_paypal_response(
+        job, operation="authorize", status="CREATED", id_="AUTH-1",
+        body=["not", "a", "dict"])
+    assert job.last_paypal_response["body"] == {}
+
+
+def test_reconcile_reads_survive_reload_for_all_open_states(tmp_path):
+    """All three reconcile branches record the successful read through
+    the one shared helper and persist it: a CREATED, a CAPTURED and a
+    VOIDED reconcile read each survive a store reload with the
+    operation "reconcile" record intact."""
+    from app.store import JsonFileStore
+
+    for auth_status, expected_job_status in (
+            ("CREATED", "AUTHORIZED"),
+            ("CAPTURED", "CAPTURED"),
+            ("VOIDED", "VOIDED")):
+        path = tmp_path / f"jobs-{auth_status}.json"
+        stub = _StubPayPal()
+        svc = EscrowService(stub, store=JsonFileStore(path))
+        job = svc.create_job(quote=_quote(), payer="payer@example",
+                             agent="agent@example", deadline_seconds=3600)
+        svc.create_order(job)
+        svc.authorize(job)
+        stub.auths["AUTH-STUB"]["status"] = auth_status
+        if auth_status == "CAPTURED":
+            stub.auths["AUTH-STUB"]["captures"] = [{
+                "id": "CAPTURE-OUTSIDE", "status": "COMPLETED",
+                "amount": {"currency_code": "USD", "value": "12.50"},
+                "authorization_id": "AUTH-STUB"}]
+        summary = svc.reconcile_open_jobs()
+        assert summary["checked"] == 1, auth_status
+        reloaded = JsonFileStore(path).get(job.job_id)
+        assert reloaded.status == expected_job_status, auth_status
+        record = reloaded.last_paypal_response
+        assert record["operation"] == "reconcile", auth_status
+        assert record["status"] == auth_status, auth_status
+        assert record["id"] == "AUTH-STUB", auth_status
+
+
+def test_failed_reconcile_keeps_delivered_job_untouched():
+    """Same failed-reconcile guarantee for a DELIVERED job: the error
+    is reported, the job stays DELIVERED with its delivery hash and
+    its authorize record intact — both open states are pinned against
+    mutation-on-error."""
+    import copy
+
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    before_record = copy.deepcopy(job.last_paypal_response)
+    assert before_record["operation"] == "authorize"
+    before_hash = job.delivery_hash
+    stub.fail_get_authorization = True
+    summary = svc.reconcile_open_jobs()
+    assert summary["checked"] == 1
+    assert summary["still_pending"] == [job.job_id]
+    assert len(summary["errors"]) == 1
+    reloaded = svc.get_job(job.job_id)
+    assert reloaded.status == "DELIVERED"
+    assert reloaded.delivery_hash == before_hash
+    assert reloaded.last_paypal_response == before_record

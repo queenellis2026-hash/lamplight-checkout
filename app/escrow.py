@@ -36,13 +36,19 @@ Rules (same spirit as the contract):
     (last_paypal_response) at every authorize / capture / void and on
     every reconcile read, so an operator can audit what PayPal said
     without re-querying it; a failed call never overwrites the last
-    good record
+    good record. The recorded body is capped (4 KB, links trimmed —
+    round 5) so a future PayPal response change cannot bloat the
+    durable store; normal responses record fully and unchanged.
   * POST /admin/reconcile (server.py) walks open jobs and forces the
-    same reconciliation from PayPal, for use after a prolonged outage
+    same reconciliation from PayPal, for use after a prolonged outage.
+    Every reconcile branch records its successful read through one
+    helper (_record_reconcile_read — round 5), so the "always persist
+    a successful read" rule is expressed once.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 import uuid
@@ -50,6 +56,87 @@ import uuid
 from .paypal_client import (PayPalClient, PayPalError, amount_to_cents,
                             first_completed_capture)
 from .quote import quote_expired
+
+
+# Round 5 (Oct 27, 2026): the recorded PayPal response body is capped so
+# a future PayPal response change cannot bloat the durable job store.
+# The guard is size-driven, not shape-driven: a normal response (a few
+# hundred bytes — ids, status, amount, captures list) is recorded fully
+# and unchanged; only an oversized body is trimmed. The cap is generous
+# against real PayPal shapes (authorize ~600 B, capture ~300 B) and
+# tight enough that no single response can grow the store without
+# bound. The guard never raises: a pathological body degrades to a
+# trimmed record, never an exception — a bad audit record must never
+# break a settlement.
+ENVELOPE_BODY_MAX_BYTES = 4096
+ENVELOPE_MAX_LINKS = 1          # links array: keep the first entry only
+ENVELOPE_MAX_LIST_ITEMS = 8     # any other list: keep the first 8
+ENVELOPE_MAX_STRING_CHARS = 512  # any string: truncate to 512 chars
+ENVELOPE_MAX_DEPTH = 6          # deeper nesting is replaced by a marker
+
+
+def _trim_value(value, depth: int):
+    """Recursively trim one JSON-shaped value for the envelope guard.
+    Non-JSON values (sets, bytes, objects) become a marker string so
+    the result is always JSON-safe; the store must never fail to save
+    because a response carried something unserializable."""
+    if depth > ENVELOPE_MAX_DEPTH:
+        return "<nested>"
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "links" and isinstance(item, list):
+                out[key] = ([_trim_value(item[0], depth + 1)]
+                            if item else [])
+            else:
+                out[key] = _trim_value(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_trim_value(item, depth + 1)
+                for item in value[:ENVELOPE_MAX_LIST_ITEMS]]
+    if isinstance(value, str) and len(value) > ENVELOPE_MAX_STRING_CHARS:
+        return value[:ENVELOPE_MAX_STRING_CHARS - 3] + "..."
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return "<unserializable>"
+
+
+def _trim_paypal_body(body) -> dict:
+    """Cap a PayPal response body before it is persisted in the
+    last_paypal_response envelope. Bodies at or under the cap are
+    returned untouched (normal responses record fully and unchanged).
+    An oversized body is trimmed deterministically — links to one
+    entry, long strings and lists cut, nesting capped — and if it is
+    still over the cap, the largest top-level keys are dropped first.
+    As a last resort the body is replaced by a marker naming the keys
+    it had, so the record always says what was dropped. Never raises.
+    """
+    try:
+        raw = json.dumps(body, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return {"_trimmed": True}
+    if len(raw.encode("utf-8")) <= ENVELOPE_BODY_MAX_BYTES:
+        return body if isinstance(body, dict) else {}
+    trimmed = _trim_value(body, 0)
+    try:
+        raw = json.dumps(trimmed, separators=(",", ":"), sort_keys=True)
+    except (TypeError, ValueError):
+        return {"_trimmed": True}
+    if len(raw.encode("utf-8")) <= ENVELOPE_BODY_MAX_BYTES:
+        return trimmed
+    # Still over the cap: drop the largest top-level keys first
+    # (deterministic order: size desc, then key name) until it fits.
+    keys = sorted(trimmed,
+                  key=lambda k: (-len(json.dumps(
+                      trimmed[k], separators=(",", ":"),
+                      sort_keys=True).encode("utf-8")), k))
+    for key in keys:
+        del trimmed[key]
+        raw = json.dumps(trimmed, separators=(",", ":"), sort_keys=True)
+        if len(raw.encode("utf-8")) <= ENVELOPE_BODY_MAX_BYTES:
+            return trimmed
+    return {"_trimmed": True, "keys": sorted(body)
+            if isinstance(body, dict) else []}
 
 
 class EscrowError(Exception):
@@ -381,12 +468,14 @@ class EscrowService:
         get_authorization results. Only successful responses are
         recorded — a failed call never overwrites the last good record,
         so a job whose reconcile 404s keeps the authorize record it
-        already had."""
+        already had. The body is capped by _trim_paypal_response_body
+        (round 5): normal responses record fully and unchanged; only
+        an oversized body is trimmed, and the guard never raises."""
         job.last_paypal_response = {
             "operation": operation,
             "status": status if isinstance(status, str) else "",
             "id": id_ if isinstance(id_, str) else "",
-            "body": body if isinstance(body, dict) else {},
+            "body": _trim_paypal_body(body if isinstance(body, dict) else {}),
         }
 
     @staticmethod
@@ -408,20 +497,27 @@ class EscrowService:
         the normal capture call) and, when the authorization resource
         lists a COMPLETED capture, its real id and amount. When it lists
         none, the id stays "" and the amount stays unknown — that case
-        is flagged reconciled and documented as unauditable. Caller sets
-        status/settled_at and saves."""
+        is flagged reconciled and documented as unauditable. This is
+        capture bookkeeping only: the reconcile read itself is recorded
+        by the reconcile tail (_record_reconcile_read), and in the
+        capture path capture() records the capture result afterwards.
+        Caller sets status/settled_at."""
         job.capture_reconciled = True
         cap = first_completed_capture(auth)
         if cap is not None:
             job.capture_id = cap.get("id", "")
             self._record_capture_amount(job, cap)
-        # The authorization body is the last PayPal response that
-        # proved the capture. In the capture path capture() overwrites
-        # this with the capture result afterwards; in the reconcile path
-        # this record stands.
+
+    def _record_reconcile_read(self, job: Job, auth: dict) -> None:
+        """Record a successful reconcile read and persist it — the one
+        place the "always persist a successful read" rule lives (round
+        5). Every reconcile branch (CREATED, CAPTURED, VOIDED) ends
+        here, so a successful read is never left in memory only and
+        survives a restart."""
         self._record_paypal_response(job, operation="reconcile",
                                      status=auth.get("status"),
                                      id_=auth.get("id"), body=auth)
+        self._save(job)
 
     def _capture_with_reconcile(self, job: Job, request_id: str) -> dict:
         """The capture call failed — but it may have executed server-side
@@ -477,40 +573,33 @@ class EscrowService:
                     "to_status": job.status, "updated": False,
                     "capture_id": job.capture_id, "error": str(e)}
         status = auth.get("status")
+        updated = False
+        to_status = job.status
         if status == "CREATED":
-            # The hold is still there — no state change, but the
-            # get_authorization result is still the last successful
-            # PayPal response, so record it (and save: the record must
-            # survive a restart, not just live in memory).
-            self._record_paypal_response(job, operation="reconcile",
-                                         status=status, id_=auth.get("id"),
-                                         body=auth)
-            self._save(job)
-            return {"job_id": job.job_id, "from_status": from_status,
-                    "to_status": job.status, "updated": False,
-                    "capture_id": job.capture_id, "error": ""}
-        if status == "CAPTURED":
+            # The hold is still there — no state change.
+            pass
+        elif status == "CAPTURED":
             self._record_captured_authorization(job, auth)
             job.status = "CAPTURED"
             job.settled_at = int(time.time())
-            self._save(job)
-            return {"job_id": job.job_id, "from_status": from_status,
-                    "to_status": "CAPTURED", "updated": True,
-                    "capture_id": job.capture_id, "error": ""}
-        if status == "VOIDED":
-            self._record_paypal_response(job, operation="reconcile",
-                                         status=status, id_=auth.get("id"),
-                                         body=auth)
+            updated = True
+            to_status = "CAPTURED"
+        elif status == "VOIDED":
             job.status = "VOIDED"
             job.settled_at = int(time.time())
-            self._save(job)
+            updated = True
+            to_status = "VOIDED"
+        else:
             return {"job_id": job.job_id, "from_status": from_status,
-                    "to_status": "VOIDED", "updated": True,
-                    "capture_id": job.capture_id, "error": ""}
+                    "to_status": job.status, "updated": False,
+                    "capture_id": job.capture_id,
+                    "error": f"unexpected authorization status {status}"}
+        # One tail for every branch: the successful read is recorded
+        # and persisted here, so no branch can forget to save it.
+        self._record_reconcile_read(job, auth)
         return {"job_id": job.job_id, "from_status": from_status,
-                "to_status": job.status, "updated": False,
-                "capture_id": job.capture_id,
-                "error": f"unexpected authorization status {status}"}
+                "to_status": to_status, "updated": updated,
+                "capture_id": job.capture_id, "error": ""}
 
     def reconcile_open_jobs(self) -> dict:
         """Walk every AUTHORIZED/DELIVERED job and reconcile it from

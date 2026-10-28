@@ -256,6 +256,19 @@ unchanged (mock gained a `/mock/forget-authorization/{id}` control).
 Held: SQLite/Postgres store, partial capture, webhook listener. Tests
 grew 87 → 96.
 
+Round 5 (Grok's round-4 re-review, same day — SOUND, no findings):
+the recorded response body is **capped** (4 KB; links trimmed to one
+entry, long strings and lists cut, oversized bodies have their largest
+keys dropped first) so a future PayPal response change cannot bloat the
+durable store — normal responses record fully and unchanged, and the
+guard never raises (a pathological body degrades to a trimmed record).
+All three reconcile branches now record their successful read through
+one shared helper (`_record_reconcile_read`), so the "always persist a
+successful read" rule is expressed once. The vanished-authorization
+test now covers a DELIVERED job too — both open states are pinned
+against mutation-on-error. Held: SQLite/Postgres store, partial
+capture, webhook listener. Tests grew 96 → 104.
+
 ## Layout
 
 ```
@@ -275,12 +288,13 @@ app/
 scripts/
   demo.py           full flows A (happy path) + B (timeout void); --mode mock|live
   mock_paypal.py    local mock PayPal sandbox (same REST surface)
-tests/              96 tests: receipts, quotes, escrow guards, client round
+tests/              104 tests: receipts, quotes, escrow guards, client round
                     trips, HTTP service, auth, idempotent recovery,
                     delivery verification, durable store, forged-now,
                     reconcile (real capture id + amount, admin endpoint),
                     single-process warning, last PayPal response (audit
-                    trail, 404 vanished authorization) — all against the mock
+                    trail, 404 vanished authorization, envelope size
+                    guard, shared reconcile helper) — all against the mock
 demo-receipts/      quotes + receipts produced by the demo run
 docs/
   SUBMISSION.md     Devpost submission draft (not submitted)
