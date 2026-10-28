@@ -257,3 +257,68 @@ per-job delivery lock — confirmed, not re-done.
 - No personal details or secrets in any changed file (swept — the only
   grep hits are pre-existing placeholders: PAYPAL_CLIENT_ID/SECRET=...
   in README/.env.example and the documented demo-only token names).
+
+## Round 3 fix — Grok's round-2 re-review — Oct 27, 2026 ~10:20 PM CDT
+
+Grok re-reviewed the round-2 code (Oct 27 ~10:13 PM CDT): SOUND for a
+single-process demo/sandbox service, 1 Medium + 1 Low, both new. All
+three round-2 fixes confirmed present and correct. The recommended
+round 3 was approved (full verbatim: reviews-2026-10-27.md).
+
+- The Low — real capture id + amount on reconcile: `app/paypal_client.py`
+  gained `first_completed_capture(auth)` (first COMPLETED capture from
+  the authorization's linked `captures`, None when PayPal lists none)
+  and `amount_to_cents(value)` (Decimal parsing, strings only, at most
+  two decimal places — no float error, no silent truncation).
+  `app/escrow.py` — `Job` gained `capture_amount_cents` (None when
+  unknown; persisted in to_store_dict/from_store_dict, with .get() so
+  pre-round-3 store files still load); `capture()` records the amount
+  from the capture result on the normal path too; `_capture_with_reconcile`
+  now recovers the real id + amount from the linked captures (only an
+  authorization listing none keeps the old `""` + reconciled fallback);
+  shared helpers `_record_capture_amount` / `_record_captured_authorization`
+  so the capture and reconcile paths cannot drift. `app/receipt.py` —
+  build_receipt gained `capture_amount_cents` (null when voided or
+  unknown); a reconciled receipt with a real id is now fully auditable
+  against the merchant account. `scripts/mock_paypal.py` — the
+  authorization resource now lists its captures (forced non-COMPLETED
+  captures are NOT linked: they never moved money).
+- The Medium, cheap half — single-process, LOUD: new README section
+  "Deployment limits — single process only" (one server process on one
+  jobs file; two processes/workers clobber each other, last writer
+  wins) and a startup warning in `app/server.py` (`__main__` prints it
+  to stderr, naming the jobs file). The SQLite/Postgres swap is HELD —
+  only the right call if this ever becomes a real multi-worker service.
+- Settle/reconcile admin endpoint: `POST /admin/reconcile` (payer
+  bearer token only — 401 no token, 403 agent token), backed by
+  `EscrowService.reconcile_job` (one open job: CREATED stays pending,
+  CAPTURED records the real id + amount with the reconciled flag,
+  VOIDED records the void, PayPal errors reported not raised) and
+  `reconcile_open_jobs` (walks AUTHORIZED/DELIVERED jobs, returns
+  checked / updated / still_pending / errors; one job's failure never
+  stops the rest). Settled jobs are never counted.
+- Tests: 66 -> 87, all passing (12.54s). New tests: amount parsing
+  (exact cents, rejects non-strings and >2dp); first_completed_capture
+  (skips non-completed, None when none); normal capture records the
+  amount; mock authorization lists linked captures; reconcile with real
+  id + amount; reconcile fallback when no capture listed; reconcile
+  still-pending (CREATED), voids, captured-without-list, skips settled
+  jobs, reports PayPal errors, refuses settled jobs; old store file
+  without capture_amount_cents still loads; receipt records the amount
+  and a reconciled receipt with a real id verifies; HTTP admin endpoint
+  (401/403, empty summary, still-pending, captures a DELIVERED job
+  with real id + amount and a released receipt, voids an AUTHORIZED
+  job); startup warning names the jobs file and the limit.
+- Mock demo re-run: both flows pass, exit 0; printed output the same
+  shape as before (same ORDER-0001/AUTH-0002/CAPTURE-0003 ids, same
+  delivery hash prefix ae337bcb…). Receipts gained one field:
+  capture_amount_cents=1250 (released) / null (voided); both hashes
+  verify. The v1 video is NOT visibly stale — the demo output form is
+  unchanged (receipt hashes are run-specific anyway). Server smoke test:
+  startup warning prints with the jobs file path; /admin/reconcile
+  returns 401 with no/bad token.
+- No personal details or secrets in any changed file (swept). Demo
+  tokens are pre-existing, labelled demo-only, env-overridable.
+- Held: SQLite/Postgres store; partial capture + residual void;
+  webhook listener. Live sandbox payee-routing proof still outstanding
+  (needs a real sandbox payee account for the worker).

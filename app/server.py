@@ -14,8 +14,8 @@ Env:   PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_BASE_URL (optional).
 
 Caller authentication (app/auth.py)
 ------------------------------------
-The mutating endpoints (authorize, deliver, capture, void) require a
-bearer token, and the caller's identity is derived from the token —
+The mutating endpoints (authorize, deliver, capture, void, admin/reconcile)
+require a bearer token, and the caller's identity is derived from the token —
 never from the request body and never from a default. The body must
 still carry the identity field (``payer`` / ``agent``) and it must
 agree with the credential; a missing field is 400, a wrong token is
@@ -34,11 +34,24 @@ Endpoints:
   POST /jobs/<id>/void         payer token: {payer} -> release hold after deadline.
                                Any `now` field in the body is ignored — the
                                deadline is always wall-clock time.
+  POST /admin/reconcile        payer token: walk every AUTHORIZED/DELIVERED
+                               job and force a get_authorization + state
+                               update from PayPal, for use after a
+                               prolonged outage. Returns a summary
+                               (checked / updated / still_pending / errors).
 
 Jobs are durable (app/store.py): the server keeps them in a JSON file
 (env LAMPLIGHT_JOBS_FILE, default jobs.json next to the server), so a
 restart never loses a job or its PayPal ids. The delivery text is
 verified on capture through the hiring agent's verify_delivery.
+
+Deployment limit — single process only: the JSON job store loads once at
+startup and rewrites the whole file on every save, under a lock. Two
+processes (or two Gunicorn/uwsgi workers) writing the same jobs file
+will clobber each other and lose jobs. Run exactly one server process
+on one jobs file (see README.md "Deployment limits"). The server prints
+this warning at startup; a multi-worker deployment needs a store with
+real concurrency control (SQLite or a database), not a file.
 """
 from __future__ import annotations
 
@@ -102,6 +115,7 @@ def _receipt_for(job) -> dict | None:
         network=job.quote.get("network", "PayPal Sandbox"),
         paypal_order_id=job.order_id, authorization_id=job.authorization_id,
         capture_id=job.capture_id,
+        capture_amount_cents=job.capture_amount_cents,
         outcome="released" if job.status == "CAPTURED" else "voided",
         delivery_hash=job.delivery_hash,
         capture_reconciled=job.capture_reconciled)
@@ -154,6 +168,19 @@ def _require_body_field(body: dict, field: str) -> str:
     return value
 
 
+def _single_process_warning(jobs_file: pathlib.Path) -> str:
+    """The startup warning for the JSON job store's single-process
+    limit. Names the jobs file, so an operator running two servers (or
+    two workers) on the same file sees which file is at risk."""
+    return (
+        "WARNING: Lamplight Checkout stores jobs in a single JSON file "
+        f"({jobs_file}) that is SINGLE-PROCESS ONLY: two server processes "
+        "or workers writing the same file will clobber each other and "
+        "lose jobs. Run exactly one server process on this file — see "
+        "README.md 'Deployment limits'."
+    )
+
+
 @app.route("/")
 def index():
     return jsonify({
@@ -163,9 +190,9 @@ def index():
                        "void on timeout. Both sides keep a hash-stable receipt.",
         "endpoints": ["/jobs", "/jobs/<id>", "/jobs/<id>/authorize",
                       "/jobs/<id>/deliver", "/jobs/<id>/capture",
-                      "/jobs/<id>/void"],
+                      "/jobs/<id>/void", "/admin/reconcile"],
         "auth": "mutating endpoints require Authorization: Bearer "
-                "(payer token for authorize/capture/void, agent token for "
+                "(payer token for authorize/capture/void/reconcile, agent token for "
                 "deliver). See app/auth.py.",
     })
 
@@ -308,6 +335,22 @@ def void_job(job_id):
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
 
 
+@app.route("/admin/reconcile", methods=["POST"])
+def admin_reconcile():
+    """Payer-only admin endpoint: walk every AUTHORIZED/DELIVERED job
+    and force a get_authorization + state update from PayPal, for use
+    after a prolonged outage (dropped responses, a restart mid-flow).
+    A job PayPal still reports CREATED stays open; one it reports
+    CAPTURED is recorded captured (real id + amount from the linked
+    captures when PayPal lists them); one it reports VOIDED is recorded
+    voided. One job's failure never stops the rest. Returns the summary
+    from EscrowService.reconcile_open_jobs: checked / updated /
+    still_pending / errors."""
+    require_payer(request, payer_id=hiring.paypal_id)
+    return jsonify(escrow().reconcile_open_jobs())
+
+
 if __name__ == "__main__":
+    print(_single_process_warning(_jobs_file()), file=sys.stderr)
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="127.0.0.1", port=port)

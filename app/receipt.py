@@ -18,6 +18,7 @@ def build_receipt(*, job_id: str, quote_id: str, service: str, payer: str,
                   agent: str, currency: str, amount_cents: int,
                   network: str, paypal_order_id: str,
                   authorization_id: str, capture_id: str = "",
+                  capture_amount_cents: int | None = None,
                   outcome: str, delivery_hash: str = "",
                   capture_reconciled: bool = False) -> dict:
     receipt = {
@@ -34,10 +35,15 @@ def build_receipt(*, job_id: str, quote_id: str, service: str, payer: str,
         "paypal_order_id": paypal_order_id,
         "authorization_id": authorization_id,
         "capture_id": capture_id,     # "" when the hold was voided, not captured
+        "capture_amount_cents": capture_amount_cents,  # amount actually
+            # captured, in cents; None when voided, or when the capture
+            # was reconciled from an authorization that lists no capture
         "capture_reconciled": capture_reconciled,  # True when the capture was
             # recorded by reconciling PayPal's authorization state after the
-            # capture response was lost: the money moved, but the capture id
-            # was never observed, so capture_id is "" on a released receipt.
+            # capture response was lost. The capture id is the real one
+            # when the authorization lists a COMPLETED capture; it is ""
+            # only when it lists none, so a reconciled receipt with a real
+            # id is fully auditable against the merchant account.
         "outcome": outcome,           # "released" | "voided" | "cancelled"
         "delivery_hash": delivery_hash,
     }

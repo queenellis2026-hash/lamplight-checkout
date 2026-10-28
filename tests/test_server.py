@@ -344,3 +344,125 @@ def test_restart_round_trip_over_http(client, mock_server, tmp_path):
                     headers=PAYER_H)
     assert r.status_code == 200, r.get_json()
     assert r.get_json()["receipt"]["outcome"] == "released"
+
+
+# ---------------------------------------------------------------------------
+# Round 3 fixes (Oct 27, 2026): /admin/reconcile endpoint, real capture
+# id + amount on reconcile, single-process startup warning.
+# ---------------------------------------------------------------------------
+
+def _job_authorization_id(client, job_id):
+    return client.get(f"/jobs/{job_id}").get_json()["job"]["authorization_id"]
+
+
+def _capture_directly(auth_id):
+    """Capture an authorization straight through the mock, bypassing
+    the escrow — as if the money moved outside the normal capture call
+    (the case /admin/reconcile exists to recover)."""
+    r = requests.post(
+        f"{BASE}/v2/payments/authorizations/{auth_id}/capture",
+        headers={"PayPal-Request-Id": "direct-test-capture"}, json={},
+        timeout=10)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _void_directly(auth_id):
+    r = requests.post(
+        f"{BASE}/v2/payments/authorizations/{auth_id}/void",
+        headers={"PayPal-Request-Id": "direct-test-void"}, json={},
+        timeout=10)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_admin_reconcile_requires_payer_token(client):
+    """No token: 401. Agent token: 403. The admin endpoint is payer-only."""
+    body = _create_job(client)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    assert client.post("/admin/reconcile").status_code == 401
+    assert client.post("/admin/reconcile",
+                       headers=_agent_headers(AUDITOR)).status_code == 403
+
+
+def test_admin_reconcile_no_open_jobs(client):
+    """Nothing open: checked 0, everything else empty."""
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json() == {"checked": 0, "updated": [],
+                            "still_pending": [], "errors": []}
+
+
+def test_admin_reconcile_still_pending_when_created(client):
+    """An AUTHORIZED job PayPal still reports CREATED is checked and
+    left alone."""
+    body = _create_job(client)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    summary = r.get_json()
+    assert summary["checked"] == 1
+    assert summary["updated"] == []
+    assert summary["still_pending"] == [job_id]
+    assert summary["errors"] == []
+    assert client.get(f"/jobs/{job_id}").get_json()["job"]["status"] == "AUTHORIZED"
+
+
+def test_admin_reconcile_captures_delivered_job(client):
+    """A DELIVERED job whose hold was captured outside the normal call
+    is recorded CAPTURED with the real capture id and amount — and the
+    receipt is released, not voided."""
+    job_id = _delivered_job(client)
+    auth_id = _job_authorization_id(client, job_id)
+    direct = _capture_directly(auth_id)
+    assert direct["status"] == "COMPLETED"
+    # The escrow still thinks the job is DELIVERED — it never saw this.
+    assert client.get(f"/jobs/{job_id}").get_json()["job"]["status"] == "DELIVERED"
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    summary = r.get_json()
+    assert summary["checked"] == 1
+    assert summary["updated"] == [{"job_id": job_id, "from": "DELIVERED",
+                                   "to": "CAPTURED",
+                                   "capture_id": direct["id"]}]
+    assert summary["still_pending"] == []
+    got = client.get(f"/jobs/{job_id}").get_json()
+    assert got["job"]["status"] == "CAPTURED"
+    assert got["job"]["capture_id"] == direct["id"]
+    assert got["job"]["capture_amount_cents"] == 1250
+    assert got["job"]["capture_reconciled"] is True
+    assert got["receipt"]["outcome"] == "released"
+    assert got["receipt"]["capture_id"] == direct["id"]
+    assert got["receipt"]["capture_amount_cents"] == 1250
+    assert got["receipt"]["capture_reconciled"] is True
+
+
+def test_admin_reconcile_voids_authorized_job(client):
+    """An AUTHORIZED job whose hold was voided outside the normal call
+    is recorded VOIDED."""
+    body = _create_job(client)
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    auth_id = _job_authorization_id(client, job_id)
+    _void_directly(auth_id)
+    r = client.post("/admin/reconcile", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    summary = r.get_json()
+    assert summary["updated"] == [{"job_id": job_id, "from": "AUTHORIZED",
+                                   "to": "VOIDED", "capture_id": ""}]
+    got = client.get(f"/jobs/{job_id}").get_json()
+    assert got["job"]["status"] == "VOIDED"
+    assert got["receipt"]["outcome"] == "voided"
+
+
+def test_single_process_warning_names_jobs_file(tmp_path):
+    """The startup warning names the jobs file and the single-process
+    limit — an operator running two servers on one file sees it."""
+    from app.server import _single_process_warning
+    path = tmp_path / "jobs.json"
+    warning = _single_process_warning(path)
+    assert str(path) in warning
+    assert "SINGLE-PROCESS ONLY" in warning
+    assert "clobber" in warning

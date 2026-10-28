@@ -291,16 +291,27 @@ class _StubPayPal:
     """In-memory PayPal stand-in for lost-response tests where the HTTP
     mock cannot help: every capture/void applies server-side and then
     the response is lost (always raises). get_authorization reports
-    the real state, which is what the escrow reconciles from."""
+    the real state, which is what the escrow reconciles from.
+
+    ``record_capture`` (default True): when a capture applies, the
+    authorization resource lists it in ``captures`` — the real shape.
+    Set False to simulate an authorization that reports CAPTURED but
+    lists no capture (the reconciled-but-unobserved fallback).
+    ``fail_get_authorization``: get_authorization raises instead of
+    answering, for the reconcile-error path."""
 
     def __init__(self):
         self.auths: dict[str, dict] = {}
         # When False, the call fails cleanly without applying server-side.
         self.capture_applies = True
         self.void_applies = True
+        self.record_capture = True
+        self.fail_get_authorization = False
+        self._last_amount_cents = 1250
 
     def create_order(self, *, amount_cents, currency="USD", description,
                      custom_id, payee_email=None, **kw):
+        self._last_amount_cents = amount_cents
         return {"id": "ORDER-STUB", "status": "CREATED",
                 "purchase_units": [{"payee": {"email_address": payee_email}}],
                 "links": []}
@@ -312,12 +323,26 @@ class _StubPayPal:
                 "purchase_units": [{"payments": {"authorizations": [auth]}}]}
 
     def get_authorization(self, authorization_id):
+        if self.fail_get_authorization:
+            raise PayPalError("get_authorization failed (transport)")
         return self.auths[authorization_id]
 
     def capture_authorization(self, authorization_id, amount_cents=None,
                               currency="USD", request_id=None):
         if self.capture_applies:
             self.auths[authorization_id]["status"] = "CAPTURED"
+            if self.record_capture:
+                from app.paypal_client import cents_to_amount
+                capture = {
+                    "id": "CAPTURE-STUB", "status": "COMPLETED",
+                    "amount": {"currency_code": currency,
+                               "value": cents_to_amount(
+                                   amount_cents if amount_cents is not None
+                                   else self._last_amount_cents)},
+                    "authorization_id": authorization_id,
+                }
+                self.auths[authorization_id].setdefault(
+                    "captures", []).append(capture)
         raise PayPalError("capture failed (transport): connection dropped")
 
     def void_authorization(self, authorization_id, request_id=None):
@@ -338,15 +363,33 @@ def _stub_authorized_job(stub):
 def test_capture_response_lost_reconciles_from_authorization():
     """Capture applies server-side, every response is lost, and the
     retry also fails. Reconciling from the authorization state must
-    still record the capture (flagged reconciled — the capture id was
-    never observed) so a receipt can be produced."""
+    still record the capture — now with the REAL capture id and amount
+    from the authorization's linked captures, flagged reconciled — so
+    the receipt is fully auditable instead of carrying an empty id."""
     stub = _StubPayPal()
     svc, job = _stub_authorized_job(stub)
     svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
     result = svc.capture(job, payer="payer@example", delivery_text="report v1")
     assert result["status"] == "COMPLETED"
     assert job.status == "CAPTURED"
+    assert job.capture_id == "CAPTURE-STUB"
+    assert job.capture_amount_cents == 1250
+    assert job.capture_reconciled is True
+
+
+def test_capture_reconcile_falls_back_when_no_capture_listed():
+    """Same lost-response path, but the authorization reports CAPTURED
+    and lists NO capture: the old fallback stands — capture id "" with
+    the reconciled flag, amount unknown, documented as unauditable."""
+    stub = _StubPayPal()
+    stub.record_capture = False
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    result = svc.capture(job, payer="payer@example", delivery_text="report v1")
+    assert result["status"] == "COMPLETED"
+    assert job.status == "CAPTURED"
     assert job.capture_id == ""
+    assert job.capture_amount_cents is None
     assert job.capture_reconciled is True
 
 
@@ -540,3 +583,204 @@ def test_store_rejects_corrupt_file(tmp_path):
     path.write_text("{not valid json")
     with pytest.raises(ValueError, match="corrupt"):
         JsonFileStore(path)
+
+# ---------------------------------------------------------------------------
+# Round 3 fixes (Oct 27, 2026): real capture id + amount on reconcile,
+# reconcile admin endpoint (service level), single-process warning.
+# Held: SQLite/Postgres store, partial capture, webhook listener.
+# ---------------------------------------------------------------------------
+
+def test_amount_to_cents():
+    """PayPal decimal strings parse to exact cents — no float error.
+    Only strings with at most two decimal places are accepted."""
+    from app.paypal_client import amount_to_cents
+    assert amount_to_cents("12.50") == 1250
+    assert amount_to_cents("0.99") == 99
+    assert amount_to_cents("12.5") == 1250
+    assert amount_to_cents("0") == 0
+    with pytest.raises(ValueError, match="bad PayPal amount"):
+        amount_to_cents("abc")
+    with pytest.raises(ValueError, match="bad PayPal amount"):
+        amount_to_cents(None)
+    with pytest.raises(ValueError, match="bad PayPal amount"):
+        amount_to_cents(1250)  # an int is not a PayPal amount string
+    with pytest.raises(ValueError, match="bad PayPal amount"):
+        amount_to_cents("12.505")  # more than two decimal places
+
+
+def test_first_completed_capture():
+    """Picks the first COMPLETED capture, skips non-completed ones,
+    returns None when the authorization lists none."""
+    from app.paypal_client import first_completed_capture
+    assert first_completed_capture({}) is None
+    assert first_completed_capture({"captures": []}) is None
+    auth = {"captures": [
+        {"id": "C-DECLINED", "status": "DECLINED"},
+        {"id": "C-FIRST", "status": "COMPLETED",
+         "amount": {"currency_code": "USD", "value": "12.50"}},
+        {"id": "C-SECOND", "status": "COMPLETED",
+         "amount": {"currency_code": "USD", "value": "12.50"}},
+    ]}
+    assert first_completed_capture(auth)["id"] == "C-FIRST"
+    assert first_completed_capture({"captures": "not-a-list"}) is None
+
+
+def test_normal_capture_records_amount(client):
+    """The happy path records the captured amount on the job, not just
+    the id — the receipt carries it, so it is auditable."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
+    assert job.status == "CAPTURED"
+    assert job.capture_id.startswith("CAPTURE-")
+    assert job.capture_amount_cents == 1250
+    assert job.capture_reconciled is False
+
+
+def test_mock_authorization_lists_linked_captures(client):
+    """After a capture, GET authorization exposes the capture in its
+    `captures` list — the shape the reconcile path reads."""
+    svc, job = _approved_authorized_job(client)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
+    r = requests.get(f"{BASE}/v2/payments/authorizations/"
+                     f"{job.authorization_id}", timeout=10)
+    assert r.status_code == 200
+    auth = r.json()
+    assert auth["status"] == "CAPTURED"
+    captures = auth.get("captures", [])
+    assert len(captures) == 1
+    assert captures[0]["id"] == job.capture_id
+    assert captures[0]["status"] == "COMPLETED"
+    assert captures[0]["amount"] == {"currency_code": "USD", "value": "12.50"}
+
+
+def test_reconcile_open_jobs_still_pending_when_created():
+    """An AUTHORIZED job PayPal still reports CREATED is checked but
+    left alone — it is still pending, not an error."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    summary = svc.reconcile_open_jobs()
+    assert summary == {"checked": 1, "updated": [],
+                       "still_pending": [job.job_id], "errors": []}
+    assert svc.get_job(job.job_id).status == "AUTHORIZED"
+
+
+def test_reconcile_open_jobs_captures_delivered_job():
+    """A DELIVERED job whose authorization PayPal reports CAPTURED (the
+    capture happened outside the normal call) is recorded CAPTURED with
+    the real id + amount and the reconciled flag."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    stub.auths["AUTH-STUB"]["status"] = "CAPTURED"
+    stub.auths["AUTH-STUB"]["captures"] = [{
+        "id": "CAPTURE-OUTSIDE", "status": "COMPLETED",
+        "amount": {"currency_code": "USD", "value": "12.50"},
+        "authorization_id": "AUTH-STUB"}]
+    summary = svc.reconcile_open_jobs()
+    assert summary["checked"] == 1
+    assert summary["still_pending"] == []
+    assert summary["errors"] == []
+    assert summary["updated"] == [{"job_id": job.job_id, "from": "DELIVERED",
+                                   "to": "CAPTURED",
+                                   "capture_id": "CAPTURE-OUTSIDE"}]
+    reloaded = svc.get_job(job.job_id)
+    assert reloaded.status == "CAPTURED"
+    assert reloaded.capture_id == "CAPTURE-OUTSIDE"
+    assert reloaded.capture_amount_cents == 1250
+    assert reloaded.capture_reconciled is True
+    assert reloaded.settled_at is not None
+
+
+def test_reconcile_open_jobs_voids_authorized_job():
+    """An AUTHORIZED job PayPal reports VOIDED is recorded VOIDED."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    stub.auths["AUTH-STUB"]["status"] = "VOIDED"
+    summary = svc.reconcile_open_jobs()
+    assert summary["updated"] == [{"job_id": job.job_id, "from": "AUTHORIZED",
+                                   "to": "VOIDED", "capture_id": ""}]
+    assert svc.get_job(job.job_id).status == "VOIDED"
+
+
+def test_reconcile_open_jobs_captured_without_listed_capture():
+    """CAPTURED with no linked capture: recorded CAPTURED with "" id
+    and unknown amount — the reconciled fallback, not a crash."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    stub.auths["AUTH-STUB"]["status"] = "CAPTURED"
+    summary = svc.reconcile_open_jobs()
+    assert summary["updated"][0]["to"] == "CAPTURED"
+    assert summary["updated"][0]["capture_id"] == ""
+    reloaded = svc.get_job(job.job_id)
+    assert reloaded.capture_id == ""
+    assert reloaded.capture_amount_cents is None
+    assert reloaded.capture_reconciled is True
+
+
+def test_reconcile_open_jobs_skips_settled_jobs():
+    """CAPTURED/VOIDED jobs are not counted — only open jobs are checked."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
+    assert job.status == "CAPTURED"
+    summary = svc.reconcile_open_jobs()
+    assert summary == {"checked": 0, "updated": [],
+                       "still_pending": [], "errors": []}
+
+
+def test_reconcile_open_jobs_reports_paypal_errors():
+    """One job's get_authorization failure is reported and counted
+    still pending — and never stops the rest."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    stub.fail_get_authorization = True
+    summary = svc.reconcile_open_jobs()
+    assert summary["checked"] == 1
+    assert summary["updated"] == []
+    assert summary["still_pending"] == [job.job_id]
+    assert len(summary["errors"]) == 1
+    assert summary["errors"][0]["job_id"] == job.job_id
+    assert svc.get_job(job.job_id).status == "AUTHORIZED"
+
+
+def test_reconcile_job_refuses_settled_job():
+    """reconcile_job on a settled job reports 'job is not open' and
+    changes nothing."""
+    stub = _StubPayPal()
+    svc, job = _stub_authorized_job(stub)
+    svc.submit_delivery(job, agent="agent@example", delivery_text="report v1")
+    svc.capture(job, payer="payer@example", delivery_text="report v1")
+    result = svc.reconcile_job(job)
+    assert result["updated"] is False
+    assert result["error"] == "job is not open"
+    assert svc.get_job(job.job_id).status == "CAPTURED"
+
+
+def test_old_store_file_without_capture_amount_loads(tmp_path):
+    """A jobs.json written before round 3 (no capture_amount_cents
+    field) still loads — the amount is simply unknown."""
+    from app.store import JsonFileStore
+    import json
+
+    path = tmp_path / "jobs.json"
+    job_data = {
+        "job_id": "oldjob1",
+        "quote": {"quote_id": "q1", "service": "audit",
+                  "price_cents": 1250, "pay_to": "agent@example",
+                  "issued_at": 0, "expires_at": 10 ** 9,
+                  "quote_hash": "0x00"},
+        "payer": "payer@example", "agent": "agent@example",
+        "created_at": 0, "deadline": 10 ** 9, "status": "CAPTURED",
+        "order_id": "ORDER-OLD", "authorization_id": "AUTH-OLD",
+        "capture_id": "CAPTURE-OLD", "delivery_hash": "ab",
+        "settled_at": 1, "capture_reconciled": False,
+    }
+    path.write_text(json.dumps({"jobs": {"oldjob1": job_data}}))
+    store = JsonFileStore(path)
+    job = store.get("oldjob1")
+    assert job.status == "CAPTURED"
+    assert job.capture_id == "CAPTURE-OLD"
+    assert job.capture_amount_cents is None

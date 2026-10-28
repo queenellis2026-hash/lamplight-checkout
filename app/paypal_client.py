@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import os
 import time
+from decimal import Decimal, InvalidOperation
 
 import requests
 
@@ -46,6 +47,36 @@ def cents_to_amount(cents: int) -> str:
     if cents < 0:
         raise ValueError("amount_cents must be >= 0")
     return f"{cents // 100}.{cents % 100:02d}"
+
+
+def amount_to_cents(value) -> int:
+    """"12.50" -> 1250. PayPal returns amounts as decimal strings;
+    parse with Decimal so float error (0.10 + 0.20 style) never appears.
+    Only strings are accepted (that is what PayPal returns), and only
+    at most two decimal places — anything else raises ValueError."""
+    if not isinstance(value, str):
+        raise ValueError(f"bad PayPal amount: {value!r}")
+    try:
+        cents = Decimal(value) * 100
+    except InvalidOperation as e:
+        raise ValueError(f"bad PayPal amount: {value!r}") from e
+    if cents != cents.to_integral_value():
+        raise ValueError(f"bad PayPal amount: {value!r}")
+    return int(cents)
+
+
+def first_completed_capture(authorization: dict) -> dict | None:
+    """The first COMPLETED capture linked to an authorization, if any.
+
+    The authorization resource carries its captures (the mock does the
+    same — see scripts/mock_paypal.py). The real sandbox may list none
+    even for a CAPTURED authorization; the caller then keeps the
+    reconciled-but-unobserved fallback (capture id "", flag set) rather
+    than inventing an id."""
+    for cap in authorization.get("captures") or []:
+        if isinstance(cap, dict) and cap.get("status") == "COMPLETED":
+            return cap
+    return None
 
 
 class PayPalClient:

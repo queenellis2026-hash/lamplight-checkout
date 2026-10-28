@@ -26,9 +26,14 @@ Rules (same spirit as the contract):
     original result instead of executing twice; if even the retry
     fails, the job is reconciled from PayPal's actual authorization
     state before giving up, so money that moved is never left
-    unrecorded
+    unrecorded — the real capture id and amount are recovered from
+    the authorization's linked captures when PayPal lists them (only
+    when it lists none does the job keep capture id "" with the
+    reconciled flag, documented as unauditable)
   * jobs live in a pluggable store (app/store.py) and every state
     change is saved, so a restart never loses a job or its PayPal ids
+  * POST /admin/reconcile (server.py) walks open jobs and forces the
+    same reconciliation from PayPal, for use after a prolonged outage
 """
 from __future__ import annotations
 
@@ -37,7 +42,8 @@ import threading
 import time
 import uuid
 
-from .paypal_client import PayPalClient, PayPalError
+from .paypal_client import (PayPalClient, PayPalError, amount_to_cents,
+                            first_completed_capture)
 from .quote import quote_expired
 
 
@@ -58,11 +64,19 @@ class Job:
         self.order_id: str = ""
         self.authorization_id: str = ""
         self.capture_id: str = ""
+        # Amount actually captured, in cents, when known (recorded from
+        # the capture result, or from the authorization's linked captures
+        # on reconcile). None when the job was voided, or when the capture
+        # was reconciled from an authorization that lists no capture.
+        self.capture_amount_cents: int | None = None
         self.delivery_hash: str = ""
         self.settled_at: int | None = None
         # True when the capture was recorded by reconciling PayPal's
         # authorization state after the capture response was lost: the
-        # money moved, but the capture id was never observed.
+        # money moved, but the capture was not observed through the
+        # normal capture call. The capture id is the real one when
+        # PayPal's authorization resource lists a COMPLETED capture, and
+        # "" only when it lists none — that case stays unauditable.
         self.capture_reconciled: bool = False
 
     def to_dict(self) -> dict:
@@ -80,6 +94,7 @@ class Job:
             "order_id": self.order_id,
             "authorization_id": self.authorization_id,
             "capture_id": self.capture_id,
+            "capture_amount_cents": self.capture_amount_cents,
             "capture_reconciled": self.capture_reconciled,
             "delivery_hash": self.delivery_hash,
             "settled_at": self.settled_at,
@@ -100,6 +115,7 @@ class Job:
             "order_id": self.order_id,
             "authorization_id": self.authorization_id,
             "capture_id": self.capture_id,
+            "capture_amount_cents": self.capture_amount_cents,
             "delivery_hash": self.delivery_hash,
             "settled_at": self.settled_at,
             "capture_reconciled": self.capture_reconciled,
@@ -117,6 +133,9 @@ class Job:
         job.order_id = data["order_id"]
         job.authorization_id = data["authorization_id"]
         job.capture_id = data["capture_id"]
+        # .get(): store files written before round 3 have no
+        # capture_amount_cents — they still load, with amount unknown.
+        job.capture_amount_cents = data.get("capture_amount_cents")
         job.delivery_hash = data["delivery_hash"]
         job.settled_at = data["settled_at"]
         job.capture_reconciled = data["capture_reconciled"]
@@ -312,10 +331,38 @@ class EscrowService:
             raise EscrowError(
                 f"capture not completed (status {result.get('status')})")
         job.capture_id = result.get("id", "")
+        self._record_capture_amount(job, result)
         job.status = "CAPTURED"
         job.settled_at = int(time.time())
         self._save(job)
         return result
+
+    @staticmethod
+    def _record_capture_amount(job: Job, capture_like: dict) -> None:
+        """Record the amount a capture moved, in cents, on the job.
+        ``capture_like`` is a PayPal capture resource (or a dict with
+        the same ``amount`` shape). An absent or unparseable amount
+        leaves the field unknown (None) — the id still stands."""
+        amount = capture_like.get("amount")
+        if isinstance(amount, dict):
+            try:
+                job.capture_amount_cents = amount_to_cents(amount.get("value"))
+            except ValueError:
+                job.capture_amount_cents = None
+
+    def _record_captured_authorization(self, job: Job, auth: dict) -> None:
+        """Record an authorization PayPal reports as CAPTURED on the job.
+        Sets the reconciled flag (the capture was not observed through
+        the normal capture call) and, when the authorization resource
+        lists a COMPLETED capture, its real id and amount. When it lists
+        none, the id stays "" and the amount stays unknown — that case
+        is flagged reconciled and documented as unauditable. Caller sets
+        status/settled_at and saves."""
+        job.capture_reconciled = True
+        cap = first_completed_capture(auth)
+        if cap is not None:
+            job.capture_id = cap.get("id", "")
+            self._record_capture_amount(job, cap)
 
     def _capture_with_reconcile(self, job: Job, request_id: str) -> dict:
         """The capture call failed — but it may have executed server-side
@@ -323,8 +370,10 @@ class EscrowService:
         idempotency key (PayPal replays the original capture). If the
         retry also fails, ask PayPal for the authorization's actual
         state: if it is CAPTURED the money moved, so record the job as
-        captured (capture id unobserved — see capture_reconciled) and
-        return a COMPLETED result so a receipt can be produced."""
+        captured — with the real capture id and amount from the
+        authorization's linked captures when PayPal lists them (only
+        when it lists none does the id stay "" with the reconciled flag)
+        — and return a COMPLETED result so a receipt can be produced."""
         try:
             return self.paypal.capture_authorization(
                 job.authorization_id, request_id=request_id)
@@ -336,11 +385,92 @@ class EscrowService:
             raise EscrowError(
                 f"PayPal capture failed and state could not be reconciled: {e}")
         if auth.get("status") == "CAPTURED":
-            job.capture_reconciled = True
+            self._record_captured_authorization(job, auth)
             self._save(job)
-            return {"id": "", "status": "COMPLETED", "reconciled": True}
+            return {"id": job.capture_id, "status": "COMPLETED",
+                    "reconciled": True}
         raise EscrowError(
             f"PayPal capture failed; authorization is {auth.get('status')}")
+
+    # -- reconcile -----------------------------------------------------------
+    def reconcile_job(self, job: Job) -> dict:
+        """Force one open job's state from PayPal's actual authorization
+        state. AUTHORIZED/DELIVERED only — settled jobs are left alone.
+        CREATED means the hold is still there (no change); CAPTURED means
+        the money moved outside the normal capture call, so the job is
+        recorded CAPTURED (real id + amount from the linked captures
+        when PayPal lists them, reconciled flag always); VOIDED means
+        the hold was released, so the job is recorded VOIDED. A PayPal
+        error leaves the job untouched and is reported, never raised —
+        the admin endpoint must reconcile the rest.
+        Returns {"job_id", "from_status", "to_status", "updated",
+        "capture_id", "error"} (error "" when there is none)."""
+        if job.status not in ("AUTHORIZED", "DELIVERED"):
+            return {"job_id": job.job_id, "from_status": job.status,
+                    "to_status": job.status, "updated": False,
+                    "capture_id": job.capture_id,
+                    "error": "job is not open"}
+        from_status = job.status
+        try:
+            auth = self.paypal.get_authorization(job.authorization_id)
+        except PayPalError as e:
+            return {"job_id": job.job_id, "from_status": from_status,
+                    "to_status": job.status, "updated": False,
+                    "capture_id": job.capture_id, "error": str(e)}
+        status = auth.get("status")
+        if status == "CREATED":
+            return {"job_id": job.job_id, "from_status": from_status,
+                    "to_status": job.status, "updated": False,
+                    "capture_id": job.capture_id, "error": ""}
+        if status == "CAPTURED":
+            self._record_captured_authorization(job, auth)
+            job.status = "CAPTURED"
+            job.settled_at = int(time.time())
+            self._save(job)
+            return {"job_id": job.job_id, "from_status": from_status,
+                    "to_status": "CAPTURED", "updated": True,
+                    "capture_id": job.capture_id, "error": ""}
+        if status == "VOIDED":
+            job.status = "VOIDED"
+            job.settled_at = int(time.time())
+            self._save(job)
+            return {"job_id": job.job_id, "from_status": from_status,
+                    "to_status": "VOIDED", "updated": True,
+                    "capture_id": job.capture_id, "error": ""}
+        return {"job_id": job.job_id, "from_status": from_status,
+                "to_status": job.status, "updated": False,
+                "capture_id": job.capture_id,
+                "error": f"unexpected authorization status {status}"}
+
+    def reconcile_open_jobs(self) -> dict:
+        """Walk every AUTHORIZED/DELIVERED job and reconcile it from
+        PayPal — the admin endpoint's workhorse, for use after a
+        prolonged outage. Returns a small summary: {"checked",
+        "updated" (list of {job_id, from, to, capture_id}),
+        "still_pending" (job ids PayPal still reports CREATED, or
+        whose state could not be read), "errors" (list of
+        {job_id, error})}. One job's failure never stops the rest."""
+        checked = 0
+        updated: list[dict] = []
+        still_pending: list[str] = []
+        errors: list[dict] = []
+        for job in self.store.all():
+            if job.status not in ("AUTHORIZED", "DELIVERED"):
+                continue
+            checked += 1
+            result = self.reconcile_job(job)
+            if result["updated"]:
+                updated.append({"job_id": job.job_id,
+                                "from": result["from_status"],
+                                "to": result["to_status"],
+                                "capture_id": result["capture_id"]})
+            else:
+                still_pending.append(job.job_id)
+                if result["error"]:
+                    errors.append({"job_id": job.job_id,
+                                   "error": result["error"]})
+        return {"checked": checked, "updated": updated,
+                "still_pending": still_pending, "errors": errors}
 
     # -- timeout ---------------------------------------------------------------
     def void_after_deadline(self, job: Job, *, payer: str, now: int | None = None) -> dict:

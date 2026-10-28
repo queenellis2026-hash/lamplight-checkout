@@ -13,7 +13,11 @@ money:
                                                   the real approve URL instead.)
   POST /v2/checkout/orders/{id}/authorize      -> authorization (order must be
                                                   APPROVED first, like live)
-  GET  /v2/payments/authorizations/{id}
+  GET  /v2/payments/authorizations/{id} — the authorization, including
+       its linked captures (a "captures" list of COMPLETED captures, in
+       creation order), so a client reconciling a lost capture response
+       can recover the real capture id and amount from PayPal's state
+       instead of recording an unauditable capture.
   POST /v2/payments/authorizations/{id}/capture -> COMPLETED capture
   POST /v2/payments/authorizations/{id}/void    -> VOIDED
 
@@ -260,6 +264,12 @@ def capture_authorization(auth_id):
         "authorization_id": auth_id,
         "create_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # The capture is linked to its authorization, so GET authorization
+    # exposes it — the same shape the real API's authorization resource
+    # carries, and what a client reconciling a lost response reads.
+    # (Forced non-COMPLETED captures above are NOT linked: they never
+    # moved money and the authorization stays CREATED.)
+    auth.setdefault("captures", []).append(capture)
     _store(request.path, 201, capture)
     if _drop_next_capture:
         # Test control: the capture applied server-side, but the response

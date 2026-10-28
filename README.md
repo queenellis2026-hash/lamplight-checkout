@@ -46,7 +46,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Full demo, no network, no money (mock PayPal sandbox):
 .venv/bin/python scripts/demo.py --mode mock
 
-# Tests (66 tests, mock PayPal included):
+# Tests (87 tests, mock PayPal included):
 .venv/bin/python -m pytest tests/ -q
 
 # HTTP service (needs sandbox creds, or point it at the mock):
@@ -135,10 +135,18 @@ acted, the retry replays the original result instead of executing
 twice (PayPal's documented idempotency). If even the retry fails, the
 escrow reconciles from PayPal's actual authorization state before
 giving up — a capture that really happened is recorded (flagged
-`capture_reconciled` on the job and the receipt, since the capture id
-was never observed) so a receipt can still be produced. A capture is
-only settled on a `COMPLETED` result and an authorization only on a
-`CREATED` one; a `DECLINED`/`DENIED` result never settles the job.
+`capture_reconciled` on the job and the receipt) with the **real
+capture id and amount**, recovered from the authorization's linked
+captures. Only when PayPal's authorization lists no capture at all
+does the job keep capture id `""` with the reconciled flag — that case
+stays documented as unauditable. A capture is only settled on a
+`COMPLETED` result and an authorization only on a `CREATED` one; a
+`DECLINED`/`DENIED` result never settles the job.
+
+`POST /admin/reconcile` (payer token) forces the same reconciliation
+for every open (AUTHORIZED/DELIVERED) job at once — for use after a
+prolonged outage. It returns a summary (checked / updated /
+still_pending / errors); one job's failure never stops the rest.
 
 ## Delivery verification in capture (round 2)
 
@@ -161,8 +169,20 @@ atomically on every state change, so a restart never loses a job or its
 PayPal ids — a fresh service on the same file picks up AUTHORIZED and
 DELIVERED jobs and capture/void keep working. Tests inject an in-memory
 store. One stated limit: the JSON file is for a single-process demo
-server; a multi-worker deployment needs a store with real concurrency
-control.
+server — see "Deployment limits — single process only" below.
+
+## Deployment limits — single process only
+
+The JSON job store loads once at startup and rewrites the whole file on
+every save, under a process-local lock. **Two server processes (or two
+Gunicorn/uwsgi workers) writing the same jobs file will clobber each
+other and lose jobs** — each process holds its own in-memory copy and
+the last writer wins. Run exactly **one server process on one jobs
+file** (env `LAMPLIGHT_JOBS_FILE`, default `jobs.json` in the project
+root). The server prints this warning at startup, naming the jobs file.
+A multi-worker deployment needs a store with real concurrency control
+(SQLite or a database) — that swap is deliberately held for later, not
+built yet.
 
 ## Forged timestamps (round 2)
 
@@ -192,6 +212,19 @@ any PayPal call); durable job store (JSON file, restart round-trip
 tested); forged `now` never accepted from the request path. Tests
 grew 54 → 66.
 
+Round 3 (Grok's round-2 re-review, same day — SOUND for a single-process
+demo, 1 Medium + 1 Low): the reconciled capture now carries the **real
+capture id and amount** from the authorization's linked captures
+(`first_completed_capture` in `paypal_client.py`, `amount_to_cents`
+for exact decimal parsing); only an authorization listing no capture
+keeps the old `""` + reconciled fallback. New `POST /admin/reconcile`
+(payer token) walks open jobs and forces a `get_authorization` + state
+update per job, returning checked / updated / still_pending / errors.
+The single-process limit is now loud: a "Deployment limits" section in
+the README and a startup warning naming the jobs file. The receipt
+gained `capture_amount_cents`. Held: SQLite/Postgres store, partial
+capture, webhook listener. Tests grew 66 → 87.
+
 ## Layout
 
 ```
@@ -207,14 +240,15 @@ app/
   store.py          pluggable job store: MemoryStore (tests) and
                     JsonFileStore (server default, restart-proof)
   server.py         Flask service: /jobs, /jobs/<id>/authorize|deliver|
-                    capture|void
+                    capture|void, /admin/reconcile
 scripts/
   demo.py           full flows A (happy path) + B (timeout void); --mode mock|live
   mock_paypal.py    local mock PayPal sandbox (same REST surface)
-tests/              66 tests: receipts, quotes, escrow guards, client round
+tests/              87 tests: receipts, quotes, escrow guards, client round
                     trips, HTTP service, auth, idempotent recovery,
-                    delivery verification, durable store, forged-now —
-                    all against the mock
+                    delivery verification, durable store, forged-now,
+                    reconcile (real capture id + amount, admin endpoint),
+                    single-process warning — all against the mock
 demo-receipts/      quotes + receipts produced by the demo run
 docs/
   SUBMISSION.md     Devpost submission draft (not submitted)

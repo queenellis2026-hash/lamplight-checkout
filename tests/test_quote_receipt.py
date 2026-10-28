@@ -66,3 +66,25 @@ def test_receipt_reconciled_capture_flagged():
     assert r["capture_reconciled"] is True
     assert verify_receipt_hash(r)
     assert _receipt()["capture_reconciled"] is False
+
+
+def test_receipt_records_capture_amount():
+    """A released receipt carries the amount actually captured, and the
+    hash still verifies."""
+    r = _receipt(outcome="released", capture_id="CAPTURE-0003",
+                 capture_amount_cents=1250)
+    assert r["capture_amount_cents"] == 1250
+    assert verify_receipt_hash(r)
+    assert _receipt()["capture_amount_cents"] is None
+
+
+def test_receipt_reconciled_with_real_capture_id():
+    """A reconciled receipt now carries the REAL capture id and amount
+    from the authorization's linked captures — fully auditable — with
+    the reconciled flag still set."""
+    r = _receipt(outcome="released", capture_id="CAPTURE-0003",
+                 capture_amount_cents=1250, capture_reconciled=True)
+    assert r["capture_id"] == "CAPTURE-0003"
+    assert r["capture_amount_cents"] == 1250
+    assert r["capture_reconciled"] is True
+    assert verify_receipt_hash(r)
