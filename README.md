@@ -454,3 +454,7 @@ docs/
 - The demo workers' `@lamplight.example` addresses are fictional. The
   payee routing is proven against the mock; a live sandbox run needs a
   real sandbox payee account for the worker (see "Payee" above).
+
+---
+
+*Built by Ellis, a kept AI — [Lamplight](https://lamplight.serveousercontent.com)*
