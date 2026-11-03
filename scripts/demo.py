@@ -7,6 +7,11 @@ receipts (same receipt design as Lamplight Pay):
                   -> deliver -> verify hash -> CAPTURE (agent paid)
   B) timeout void: brief -> quote -> order -> approve -> AUTHORIZE
                   -> agent never delivers -> deadline passes -> VOID (hold released)
+  C) partial release (round 8): brief -> quote ($8.00 hold) -> order
+                  -> approve -> AUTHORIZE -> deliver -> verify hash
+                  -> CAPTURE-PARTIAL $5.00 + VOID residual $3.00 in one
+                  move — the receipt shows the split (captured + voided
+                  = the hold)
 
 Modes:
   --mode mock (default): spins up scripts/mock_paypal.py on 127.0.0.1:5001
@@ -90,9 +95,13 @@ def receipt_for(job, outcome: str) -> dict:
         network=job.quote.get("network", "PayPal Sandbox"),
         paypal_order_id=job.order_id, authorization_id=job.authorization_id,
         capture_id=job.capture_id, capture_amount_cents=job.capture_amount_cents,
+        voided_amount_cents=job.voided_amount_cents,
         outcome=outcome,
         delivery_hash=job.delivery_hash,
-        last_paypal_response=job.last_paypal_response)
+        capture_reconciled=job.capture_reconciled,
+        settlement_method=job.settlement_method,
+        last_paypal_response=job.last_paypal_response,
+        webhook_denial=job.webhook_denial)
 
 
 def flow_a(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, live: bool) -> None:
@@ -154,6 +163,40 @@ def flow_b(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, liv
     print(f"    receipt_hash={receipt['receipt_hash']}")
 
 
+def flow_c(svc: EscrowService, hiring: HiringAgent, client: PayPalClient, *, live: bool) -> None:
+    print("\n[C] partial release — agent delivers part of the work, "
+          "payer releases $5.00 of the $8.00 hold, rest voided")
+    quote, worker = hiring.negotiate("draft a launch announcement, budget $20")
+    print(f"    quote {quote['quote_id'][:8]}… service={quote['service']!r} "
+          f"price=${quote['price_cents'] / 100:.2f} worker={worker['agent_id']}")
+    (OUT / "quote-C.json").write_text(quote_json(quote))
+    job = svc.create_job(quote=quote, payer=hiring.paypal_id,
+                         agent=worker["paypal_id"], deadline_seconds=3600)
+    order = svc.create_order(job)
+    print(f"    order {order['id']} status={order['status']} (AUTHORIZE intent)")
+    approve_order(client, order, live=live)
+    svc.authorize(job)
+    print(f"    AUTHORIZED hold: authorization {job.authorization_id}")
+    delivery = "launch announcement draft: headline + two paragraphs"
+    dh = svc.submit_delivery(job, agent=worker["paypal_id"], delivery_text=delivery)
+    print(f"    delivered, delivery_hash={dh[:16]}…")
+    assert hiring.verify_delivery(job, delivery), "delivery hash mismatch"
+    print("    payer agent verified the delivery hash — matches")
+    # capture_partial() enforces the same check itself, so the payer's
+    # pre-check above is the decision and the partial capture is the gate.
+    svc.capture_partial(job, payer=hiring.paypal_id, delivery_text=delivery,
+                        amount_cents=500)
+    print(f"    CAPTURED (partial): capture {job.capture_id} — agent paid "
+          f"$5.00, residual $3.00 voided back to payer")
+    assert job.capture_amount_cents == 500
+    assert job.voided_amount_cents == 300
+    receipt = receipt_for(job, "released")
+    assert receipt["capture_amount_cents"] == 500
+    assert receipt["voided_amount_cents"] == 300
+    (OUT / "receipt-C-partial.json").write_text(receipt_json(receipt))
+    print(f"    receipt_hash={receipt['receipt_hash']}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["mock", "live"], default="mock")
@@ -185,10 +228,11 @@ def main() -> None:
     try:
         flow_a(svc, hiring, client, live=live)
         flow_b(svc, hiring, client, live=live)
+        flow_c(svc, hiring, client, live=live)
     finally:
         if mock_proc is not None:
             mock_proc.terminate()
-    print("\nBoth flows passed. Receipts in demo-receipts/.")
+    print("\nAll three flows passed. Receipts in demo-receipts/.")
 
 
 if __name__ == "__main__":

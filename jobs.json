@@ -1,0 +1,1066 @@
+{
+  "audit_events": [
+    {
+      "event_id": "74cd4c5f7d824b3fab19504ad3eabdb9",
+      "idempotency_key": null,
+      "job_id": "0142db44a1004cfc8be1fbff33ef2021",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650525
+    },
+    {
+      "event_id": "bc1ebc0da9104b218cc10be536391350",
+      "idempotency_key": null,
+      "job_id": "56ec88113ff94230bbb4e9a511429a29",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650528
+    },
+    {
+      "event_id": "40c5a41b941f4420b071dc2155616f51",
+      "idempotency_key": "lamplight-authorize-56ec88113ff94230bbb4e9a511429a29-ORDER-0002",
+      "job_id": "56ec88113ff94230bbb4e9a511429a29",
+      "operation": "authorize",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0002",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "12.50"
+                    },
+                    "id": "AUTH-0003",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0003",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "AUTHORIZED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650528
+    },
+    {
+      "event_id": "379f4c0d8b604240a93a128b30b0bee3",
+      "idempotency_key": null,
+      "job_id": "56ec88113ff94230bbb4e9a511429a29",
+      "operation": "capture",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0003",
+          "create_time": "2026-11-02T20:15:31Z",
+          "id": "CAPTURE-0004",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0004",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": 1250,
+        "capture_ids": [
+          "CAPTURE-0004"
+        ],
+        "capture_status": "COMPLETED",
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": "observed",
+        "status": "CAPTURED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650531
+    },
+    {
+      "event_id": "308f6f27ff764edeb04439b61b2d20d1",
+      "idempotency_key": null,
+      "job_id": "6d9b4fe5fd924c5695b1fe60ee115f0b",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650536
+    },
+    {
+      "event_id": "d52635b7e92f4be1bff31d70a1a6eb5a",
+      "idempotency_key": "lamplight-authorize-6d9b4fe5fd924c5695b1fe60ee115f0b-ORDER-0005",
+      "job_id": "6d9b4fe5fd924c5695b1fe60ee115f0b",
+      "operation": "authorize",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0005",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "8.00"
+                    },
+                    "id": "AUTH-0006",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0006",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "AUTHORIZED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650536
+    },
+    {
+      "event_id": "7299d54dcaab4469b340c0336ac608b1",
+      "idempotency_key": null,
+      "job_id": "6d9b4fe5fd924c5695b1fe60ee115f0b",
+      "operation": "capture_partial",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "8.00"
+          },
+          "captures": [
+            {
+              "amount": {
+                "currency_code": "USD",
+                "value": "5.00"
+              },
+              "id": "CAPTURE-0007",
+              "status": "COMPLETED"
+            }
+          ],
+          "create_time": "2026-11-02T20:15:36Z",
+          "expiration_time": "2026-12-01T20:15:36Z",
+          "id": "AUTH-0006",
+          "status": "VOIDED"
+        },
+        "id": "AUTH-0006",
+        "operation": "void",
+        "status": "VOIDED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": 500,
+        "capture_ids": [
+          "CAPTURE-0007"
+        ],
+        "capture_status": "COMPLETED",
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": "observed",
+        "status": "CAPTURED",
+        "voided_amount_cents": 300
+      },
+      "ts": 1793650536
+    },
+    {
+      "event_id": "67dcdc803134421bb39d834fdc65be1f",
+      "idempotency_key": null,
+      "job_id": "a18f33e85abf49e8ba100de21354a5a1",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650541
+    },
+    {
+      "event_id": "7ec1cb90df9c4ec59af561c1d60017f1",
+      "idempotency_key": "lamplight-authorize-a18f33e85abf49e8ba100de21354a5a1-ORDER-0008",
+      "job_id": "a18f33e85abf49e8ba100de21354a5a1",
+      "operation": "authorize",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0008",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "12.50"
+                    },
+                    "id": "AUTH-0009",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0009",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "AUTHORIZED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650541
+    },
+    {
+      "event_id": "5b65e9d93f044113a79c1556a3272e8d",
+      "idempotency_key": "87afac91eaaf041fd313cceb230b002e0a0922a2fb2938fe577254d5fafa682c",
+      "job_id": "a18f33e85abf49e8ba100de21354a5a1",
+      "operation": "capture",
+      "outcome": "retried",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0008",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "12.50"
+                    },
+                    "id": "AUTH-0009",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0009",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": "capture POST lost its response; replaying the stored idempotency key so PayPal replays the original instead of capturing twice",
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "DELIVERED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650542
+    },
+    {
+      "event_id": "e689589a45a549b5ac282da658400a78",
+      "idempotency_key": null,
+      "job_id": "a18f33e85abf49e8ba100de21354a5a1",
+      "operation": "capture",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0009",
+          "create_time": "2026-11-02T20:15:42Z",
+          "id": "CAPTURE-0010",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0010",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": 1250,
+        "capture_ids": [
+          "CAPTURE-0010"
+        ],
+        "capture_status": "COMPLETED",
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": "observed",
+        "status": "CAPTURED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650542
+    },
+    {
+      "event_id": "4838bf5f6a73456690b05be5213e3704",
+      "idempotency_key": null,
+      "job_id": "30bdb2f9ecd44ddabb6c027495b021ec",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650566
+    },
+    {
+      "event_id": "b4c9df9f21ad4a7db19905d4f8725341",
+      "idempotency_key": "lamplight-authorize-30bdb2f9ecd44ddabb6c027495b021ec-ORDER-0011",
+      "job_id": "30bdb2f9ecd44ddabb6c027495b021ec",
+      "operation": "authorize",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0011",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "12.50"
+                    },
+                    "id": "AUTH-0012",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0012",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "AUTHORIZED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650566
+    },
+    {
+      "event_id": "252195372af445a795e2e91a879ce23a",
+      "idempotency_key": "670afeea4e88498b0cbb78f66ec47d804cfeef83239532af5c25d8bcd5d8c64a",
+      "job_id": "30bdb2f9ecd44ddabb6c027495b021ec",
+      "operation": "capture",
+      "outcome": "retried",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0011",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "12.50"
+                    },
+                    "id": "AUTH-0012",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0012",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": "capture POST lost its response; replaying the stored idempotency key so PayPal replays the original instead of capturing twice",
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "DELIVERED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650566
+    },
+    {
+      "event_id": "45827c5413fe44f89486105aad6d81c5",
+      "idempotency_key": null,
+      "job_id": "30bdb2f9ecd44ddabb6c027495b021ec",
+      "operation": "capture",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0012",
+          "create_time": "2026-11-02T20:16:06Z",
+          "id": "CAPTURE-0013",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0013",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": 1250,
+        "capture_ids": [
+          "CAPTURE-0013"
+        ],
+        "capture_status": "COMPLETED",
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": "observed",
+        "status": "CAPTURED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793650566
+    },
+    {
+      "event_id": "0050f290f4da41c58b67bf6c5782aa4d",
+      "idempotency_key": null,
+      "job_id": "1f53ca7b04524d708368aef9566bd706",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793651404
+    },
+    {
+      "event_id": "4b9c52c3e6c94245af1b712241ecf4be",
+      "idempotency_key": null,
+      "job_id": "da154cd9e68945de8dda0bc77a5e3307",
+      "operation": "create_order",
+      "outcome": "completed",
+      "paypal_reported": null,
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "QUOTED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793651432
+    },
+    {
+      "event_id": "7881fb0cf1c24c03941d0ecce8fd01dc",
+      "idempotency_key": "lamplight-authorize-da154cd9e68945de8dda0bc77a5e3307-ORDER-0001",
+      "job_id": "da154cd9e68945de8dda0bc77a5e3307",
+      "operation": "authorize",
+      "outcome": "completed",
+      "paypal_reported": {
+        "body": {
+          "id": "ORDER-0001",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "8.00"
+                    },
+                    "id": "AUTH-0002",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0002",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "reason": null,
+      "recorded": {
+        "capture_amount_cents": null,
+        "capture_ids": [],
+        "capture_status": null,
+        "needs_review": false,
+        "needs_review_reason": null,
+        "settlement_method": null,
+        "status": "AUTHORIZED",
+        "voided_amount_cents": null
+      },
+      "ts": 1793651433
+    }
+  ],
+  "jobs": {
+    "0142db44a1004cfc8be1fbff33ef2021": {
+      "agent": "auditor-01@lamplight.example",
+      "authorization_id": "",
+      "authorize_attempted": false,
+      "authorized_at": null,
+      "capture_amount_cents": null,
+      "capture_amounts": [],
+      "capture_attempt": 0,
+      "capture_id": "",
+      "capture_ids": [],
+      "capture_reconciled": false,
+      "capture_status": null,
+      "created_at": 1793650525,
+      "deadline": 1793654125,
+      "delivery_hash": "",
+      "inspection_deadline": null,
+      "job_id": "0142db44a1004cfc8be1fbff33ef2021",
+      "last_paypal_response": null,
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0001",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793654125,
+        "issued_at": 1793650525,
+        "network": "PayPal Sandbox",
+        "nonce": "718afb2c37b9407f",
+        "pay_to": "auditor-01@lamplight.example",
+        "price_cents": 1250,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x4210ab13903a4be430381d9e6a8b94d6547cbe70093dcd37dd4a2b4938278379",
+        "quote_id": "d5687193-20d3-4a04-ab11-782aa8d75001",
+        "service": "on-chain holder audit (top-20 wallets)"
+      },
+      "settled_at": null,
+      "settlement_method": null,
+      "settlement_note": null,
+      "status": "QUOTED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    },
+    "1f53ca7b04524d708368aef9566bd706": {
+      "agent": "writer-02@lamplight.example",
+      "authorization_id": "",
+      "authorize_attempted": false,
+      "authorized_at": null,
+      "capture_amount_cents": null,
+      "capture_amounts": [],
+      "capture_attempt": 0,
+      "capture_id": "",
+      "capture_ids": [],
+      "capture_reconciled": false,
+      "capture_status": null,
+      "created_at": 1793651403,
+      "deadline": 1793655003,
+      "delivery_hash": "",
+      "inspection_deadline": null,
+      "job_id": "1f53ca7b04524d708368aef9566bd706",
+      "last_paypal_response": null,
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0001",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793655003,
+        "issued_at": 1793651403,
+        "network": "PayPal Sandbox",
+        "nonce": "4ddb1ae748e84052",
+        "pay_to": "writer-02@lamplight.example",
+        "price_cents": 800,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x1d944b9a885378b6c38b093c48dbb8d7cf7a0054b03d462534bf3556ad12399b",
+        "quote_id": "a77ba483-270d-46a9-bfa7-0dfcbd5e4679",
+        "service": "research summary and write-up"
+      },
+      "settled_at": null,
+      "settlement_method": null,
+      "settlement_note": null,
+      "status": "QUOTED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    },
+    "30bdb2f9ecd44ddabb6c027495b021ec": {
+      "agent": "auditor-01@lamplight.example",
+      "authorization_id": "AUTH-0012",
+      "authorize_attempted": true,
+      "authorized_at": 1793650566,
+      "capture_amount_cents": 1250,
+      "capture_amounts": [
+        1250
+      ],
+      "capture_attempt": 0,
+      "capture_id": "CAPTURE-0013",
+      "capture_ids": [
+        "CAPTURE-0013"
+      ],
+      "capture_reconciled": false,
+      "capture_status": "COMPLETED",
+      "created_at": 1793650566,
+      "deadline": 1793654166,
+      "delivery_hash": "4a0102bb0ca1e486a4706a7eaf4cb2662a3c54ebb294d33f49f892eba9c8588f",
+      "inspection_deadline": 1793823366,
+      "job_id": "30bdb2f9ecd44ddabb6c027495b021ec",
+      "last_paypal_response": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0012",
+          "create_time": "2026-11-02T20:16:06Z",
+          "id": "CAPTURE-0013",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0013",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0011",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793654166,
+        "issued_at": 1793650566,
+        "network": "PayPal Sandbox",
+        "nonce": "bfaee558fc8f47e1",
+        "pay_to": "auditor-01@lamplight.example",
+        "price_cents": 1250,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x35a7b32655670bdda661f786c2735749e832a6a5286a82d3b1e1dc27345f5359",
+        "quote_id": "29718c71-a33f-4643-899e-6c96bcf2851c",
+        "service": "on-chain holder audit (top-20 wallets)"
+      },
+      "settled_at": 1793650566,
+      "settlement_method": "observed",
+      "settlement_note": null,
+      "status": "CAPTURED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    },
+    "56ec88113ff94230bbb4e9a511429a29": {
+      "agent": "auditor-01@lamplight.example",
+      "authorization_id": "AUTH-0003",
+      "authorize_attempted": true,
+      "authorized_at": 1793650528,
+      "capture_amount_cents": 1250,
+      "capture_amounts": [
+        1250
+      ],
+      "capture_attempt": 0,
+      "capture_id": "CAPTURE-0004",
+      "capture_ids": [
+        "CAPTURE-0004"
+      ],
+      "capture_reconciled": false,
+      "capture_status": "COMPLETED",
+      "created_at": 1793650528,
+      "deadline": 1793654128,
+      "delivery_hash": "4a0102bb0ca1e486a4706a7eaf4cb2662a3c54ebb294d33f49f892eba9c8588f",
+      "inspection_deadline": 1793823331,
+      "job_id": "56ec88113ff94230bbb4e9a511429a29",
+      "last_paypal_response": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0003",
+          "create_time": "2026-11-02T20:15:31Z",
+          "id": "CAPTURE-0004",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0004",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0002",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793654128,
+        "issued_at": 1793650528,
+        "network": "PayPal Sandbox",
+        "nonce": "f7e121a9c8214e07",
+        "pay_to": "auditor-01@lamplight.example",
+        "price_cents": 1250,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x070f6d687499fdf9eabbfe0ccea9f24c11eb90bebf028731a536a95362d8b1d9",
+        "quote_id": "8d77a7db-858b-45b4-8fba-caa9d12e6092",
+        "service": "on-chain holder audit (top-20 wallets)"
+      },
+      "settled_at": 1793650531,
+      "settlement_method": "observed",
+      "settlement_note": null,
+      "status": "CAPTURED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    },
+    "6d9b4fe5fd924c5695b1fe60ee115f0b": {
+      "agent": "writer-02@lamplight.example",
+      "authorization_id": "AUTH-0006",
+      "authorize_attempted": true,
+      "authorized_at": 1793650536,
+      "capture_amount_cents": 500,
+      "capture_amounts": [
+        500
+      ],
+      "capture_attempt": 0,
+      "capture_id": "CAPTURE-0007",
+      "capture_ids": [
+        "CAPTURE-0007"
+      ],
+      "capture_reconciled": false,
+      "capture_status": "COMPLETED",
+      "created_at": 1793650536,
+      "deadline": 1793654136,
+      "delivery_hash": "4a0102bb0ca1e486a4706a7eaf4cb2662a3c54ebb294d33f49f892eba9c8588f",
+      "inspection_deadline": 1793823336,
+      "job_id": "6d9b4fe5fd924c5695b1fe60ee115f0b",
+      "last_paypal_response": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "8.00"
+          },
+          "captures": [
+            {
+              "amount": {
+                "currency_code": "USD",
+                "value": "5.00"
+              },
+              "id": "CAPTURE-0007",
+              "status": "COMPLETED"
+            }
+          ],
+          "create_time": "2026-11-02T20:15:36Z",
+          "expiration_time": "2026-12-01T20:15:36Z",
+          "id": "AUTH-0006",
+          "status": "VOIDED"
+        },
+        "id": "AUTH-0006",
+        "operation": "void",
+        "status": "VOIDED"
+      },
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0005",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793654136,
+        "issued_at": 1793650536,
+        "network": "PayPal Sandbox",
+        "nonce": "969e5d0e2dfb4f6e",
+        "pay_to": "writer-02@lamplight.example",
+        "price_cents": 800,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x4953a92eb0da21103e0113ff8b2c5a957fd6defbaf0921c58ec754e6ac3dc61f",
+        "quote_id": "25dabb39-ec15-436f-9c86-80da0752f14d",
+        "service": "research summary and write-up"
+      },
+      "settled_at": 1793650536,
+      "settlement_method": "observed",
+      "settlement_note": null,
+      "status": "CAPTURED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": 300,
+      "webhook_denial": null
+    },
+    "a18f33e85abf49e8ba100de21354a5a1": {
+      "agent": "auditor-01@lamplight.example",
+      "authorization_id": "AUTH-0009",
+      "authorize_attempted": true,
+      "authorized_at": 1793650541,
+      "capture_amount_cents": 1250,
+      "capture_amounts": [
+        1250
+      ],
+      "capture_attempt": 0,
+      "capture_id": "CAPTURE-0010",
+      "capture_ids": [
+        "CAPTURE-0010"
+      ],
+      "capture_reconciled": false,
+      "capture_status": "COMPLETED",
+      "created_at": 1793650541,
+      "deadline": 1793654141,
+      "delivery_hash": "4a0102bb0ca1e486a4706a7eaf4cb2662a3c54ebb294d33f49f892eba9c8588f",
+      "inspection_deadline": 1793823341,
+      "job_id": "a18f33e85abf49e8ba100de21354a5a1",
+      "last_paypal_response": {
+        "body": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "12.50"
+          },
+          "authorization_id": "AUTH-0009",
+          "create_time": "2026-11-02T20:15:42Z",
+          "id": "CAPTURE-0010",
+          "status": "COMPLETED"
+        },
+        "id": "CAPTURE-0010",
+        "operation": "capture",
+        "status": "COMPLETED"
+      },
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0008",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793654141,
+        "issued_at": 1793650541,
+        "network": "PayPal Sandbox",
+        "nonce": "c3cd4fea76104d24",
+        "pay_to": "auditor-01@lamplight.example",
+        "price_cents": 1250,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x485e4c094e48a60c02c38b64c8918ad04c46fe71922436d3e82ee68219743cf2",
+        "quote_id": "c3463c26-d759-4241-9da7-ff89cc71ef53",
+        "service": "on-chain holder audit (top-20 wallets)"
+      },
+      "settled_at": 1793650542,
+      "settlement_method": "observed",
+      "settlement_note": null,
+      "status": "CAPTURED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    },
+    "da154cd9e68945de8dda0bc77a5e3307": {
+      "agent": "writer-02@lamplight.example",
+      "authorization_id": "AUTH-0002",
+      "authorize_attempted": true,
+      "authorized_at": 1793651433,
+      "capture_amount_cents": null,
+      "capture_amounts": [],
+      "capture_attempt": 0,
+      "capture_id": "",
+      "capture_ids": [],
+      "capture_reconciled": false,
+      "capture_status": null,
+      "created_at": 1793651432,
+      "deadline": 1793655032,
+      "delivery_hash": "4a0102bb0ca1e486a4706a7eaf4cb2662a3c54ebb294d33f49f892eba9c8588f",
+      "inspection_deadline": 1793824233,
+      "job_id": "da154cd9e68945de8dda0bc77a5e3307",
+      "last_paypal_response": {
+        "body": {
+          "id": "ORDER-0001",
+          "purchase_units": [
+            {
+              "payments": {
+                "authorizations": [
+                  {
+                    "amount": {
+                      "currency_code": "USD",
+                      "value": "8.00"
+                    },
+                    "id": "AUTH-0002",
+                    "status": "CREATED"
+                  }
+                ]
+              }
+            }
+          ],
+          "status": "COMPLETED"
+        },
+        "id": "AUTH-0002",
+        "operation": "authorize",
+        "status": "CREATED"
+      },
+      "last_void_attempt_time": null,
+      "needs_review": false,
+      "needs_review_amount_cents": null,
+      "needs_review_reason": null,
+      "order_id": "ORDER-0001",
+      "payer": "ellis@lamplight.example",
+      "pending_capture_amount_cents": null,
+      "pending_capture_created_at": null,
+      "pending_capture_request_id": null,
+      "pending_void_request_id": null,
+      "quote": {
+        "currency": "USD",
+        "expires_at": 1793655032,
+        "issued_at": 1793651432,
+        "network": "PayPal Sandbox",
+        "nonce": "ad6df72a67f848f0",
+        "pay_to": "writer-02@lamplight.example",
+        "price_cents": 800,
+        "protocol": "lamplight-checkout/1",
+        "quote_hash": "0x32d503cdb9c4747bb5199c0264296519f1f042d021fbacd58f016a71f3f9bfa3",
+        "quote_id": "1412c50f-51fd-45b2-bdc6-9ee436889985",
+        "service": "research summary and write-up"
+      },
+      "settled_at": null,
+      "settlement_method": null,
+      "settlement_note": null,
+      "status": "DELIVERED",
+      "void_attempts": 0,
+      "void_read_failed": false,
+      "voided_amount_cents": null,
+      "webhook_denial": null
+    }
+  },
+  "webhook_claims": {},
+  "webhook_events": []
+}

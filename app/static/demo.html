@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lamplight — PayPal-powered conditional payment coordination</title>
+<style>
+  :root { --bg: #0f1420; --card: #1a2233; --ink: #e8edf5; --dim: #9aa7bd;
+          --green: #4ade80; --amber: #fbbf24; --red: #f87171; --line: #2b3648; }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font-family: system-ui, sans-serif;
+         margin: 0; padding: 24px; max-width: 860px; margin-inline: auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .tagline { color: var(--dim); margin: 0 0 20px; font-size: 0.95rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 16px 18px; margin: 12px 0; }
+  .card h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input[type=text], input[type=number] { background: #0f1420; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.9rem; }
+  input[type=text] { flex: 1; min-width: 220px; }
+  button { background: #3b82f6; color: white; border: 0; border-radius: 8px;
+           padding: 9px 16px; font-size: 0.9rem; cursor: pointer; }
+  button:disabled { background: #334155; cursor: default; }
+  button.ghost { background: transparent; border: 1px solid var(--line); }
+  .step { display: flex; gap: 10px; align-items: baseline; padding: 6px 0;
+          border-top: 1px solid #232c40; font-size: 0.92rem; }
+  .step:first-of-type { border-top: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #334155; flex: none;
+         transform: translateY(1px); }
+  .dot.ok { background: var(--green); } .dot.wait { background: var(--amber); }
+  .dot.err { background: var(--red); }
+  .mono { font-family: ui-monospace, monospace; font-size: 0.85rem; color: var(--dim);
+          word-break: break-all; }
+  .money { font-size: 1.6rem; font-weight: 700; }
+  .green { color: var(--green); } .amber { color: var(--amber); }
+  .hidden { display: none; }
+  .receipt { background: #0f1420; border-radius: 8px; padding: 10px 12px; margin-top: 8px; }
+  label { font-size: 0.85rem; color: var(--dim); }
+  .failbox { border: 1px dashed var(--amber); border-radius: 8px; padding: 10px 12px;
+             margin-top: 10px; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Lamplight</h1>
+<p class="tagline">Trust shouldn't be the price of doing business. An agent hires another
+agent &mdash; the money stays held until the delivery matches. A partial job pays
+partial and gives the rest back.</p>
+
+<div class="card">
+  <h2>Beat 1 &mdash; full job: hold &rarr; deliver &rarr; capture</h2>
+  <div class="row">
+    <input type="text" id="brief1" value="audit the top-20 holders, budget $50">
+    <button id="go1" onclick="runBeat1()">Run beat 1</button>
+  </div>
+  <div id="steps1"></div>
+</div>
+
+<div class="card">
+  <h2>Beat 2 &mdash; partial job: $8 hold &rarr; $5 paid &rarr; $3 back</h2>
+  <div class="row">
+    <input type="text" id="brief2" value="write a summary of the audit, budget $50">
+    <button id="go2" onclick="runBeat2()">Run beat 2</button>
+  </div>
+  <div id="steps2"></div>
+</div>
+
+<div class="card">
+  <h2>Scripted failure &mdash; the response is lost, the money isn't</h2>
+  <p style="font-size:0.9rem;color:var(--dim)">Drops the capture response in the mock
+  PayPal, then reconciles: the same idempotency key settles exactly once.</p>
+  <div class="row"><button id="go3" onclick="runFailure()">Run the failure</button></div>
+  <div id="steps3"></div>
+</div>
+
+<script>
+const PAYER_TOKEN = "demo-payer-token";
+const PAYER_ID = "ellis@lamplight.example";
+const AGENTS = {
+  "auditor-01@lamplight.example": "demo-agent-auditor-01",
+  "writer-02@lamplight.example": "demo-agent-writer-02",
+  "coder-03@lamplight.example": "demo-agent-coder-03",
+};
+// Mock test controls go through the Flask proxy at /mock/* — same origin,
+// so no CORS. (A direct fetch to the mock port dies in a real browser.)
+const MOCK = "/mock";
+const DELIVERY = "audit report: top-20 holders";
+
+function el(id) { return document.getElementById(id); }
+function step(box, html, cls) {
+  const d = document.createElement("div");
+  d.className = "step";
+  d.innerHTML = `<span class="dot ${cls||""}"></span><span>${html}</span>`;
+  el(box).appendChild(d);
+  return d.querySelector(".dot");
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+const cents = c => "$" + (c/100).toFixed(2);
+
+async function beat(box, brief, partialCents) {
+  el(box).innerHTML = "";
+  // 1. brief -> quote
+  let dot = step(box, "Brief in &rarr; matching a worker off the rate card&hellip;", "wait");
+  const created = await api("/jobs", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({brief})});
+  const jobId = created.job.job_id, quote = created.quote;
+  // The quote names the matched worker's PayPal account — that is the
+  // agent who must deliver. (v8.2 review: the page used to fall back to
+  // auditor-01 here, which 403'd every non-audit beat.)
+  const agentId = quote.pay_to;
+  const agentToken = AGENTS[agentId];
+  if (!agentToken) throw new Error("no demo token for agent " + agentId);
+  dot.className = "dot ok";
+  step(box, `Quote card: <b>${quote.service}</b> worker <span class="mono">${created.worker}</span>,
+    <span class="money">${cents(quote.price_cents)}</span> &mdash; <span class="amber">hold not sent</span>.`, "ok");
+
+  // 2. mock approve + authorize (the hold)
+  dot = step(box, "Buyer approves (mock) &rarr; placing the hold&hellip;", "wait");
+  await fetch(`${MOCK}/approve/${created.paypal_order.id}`, {method:"POST"});
+  await api(`/jobs/${jobId}/authorize`, {method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN},
+    body: JSON.stringify({payer: PAYER_ID})});
+  dot.className = "dot ok";
+  step(box, `<span class="money amber">${cents(quote.price_cents)}</span> held &mdash;
+    the agent can't touch it yet.`, "ok");
+
+  // 3. deliver + hash (agentToken declared once, above)
+  dot = step(box, "Agent delivers &rarr; hashing the delivery&hellip;", "wait");
+  const del = await api(`/jobs/${jobId}/deliver`, {method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":"Bearer "+agentToken},
+    body: JSON.stringify({agent: agentId, delivery_text: DELIVERY})});
+  dot.className = "dot ok";
+  step(box, `Delivery hash <span class="mono">${del.delivery_hash.slice(0,18)}&hellip;</span> recorded.`, "ok");
+
+  // 4. capture (full or partial)
+  dot = step(box, partialCents ? `Capturing ${cents(partialCents)} of ${cents(quote.price_cents)}&hellip;` : "Delivery matches &rarr; capturing&hellip;", "wait");
+  let cap;
+  if (partialCents) {
+    cap = await api(`/jobs/${jobId}/capture-partial`, {method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN},
+      body: JSON.stringify({payer: PAYER_ID, delivery_text: DELIVERY, amount_cents: partialCents})});
+  } else {
+    cap = await api(`/jobs/${jobId}/capture`, {method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN},
+      body: JSON.stringify({payer: PAYER_ID, delivery_text: DELIVERY})});
+  }
+  dot.className = "dot ok";
+  const rc = cap.receipt;
+  const split = rc.voided_amount_cents
+    ? `<span class="money green">${cents(rc.capture_amount_cents)}</span> paid +
+       <span class="money green">${cents(rc.voided_amount_cents)}</span> returned =
+       <span class="money">${cents(rc.capture_amount_cents + rc.voided_amount_cents)}</span>`
+    : `<span class="money green">${cents(rc.capture_amount_cents)}</span> released to the agent`;
+  step(box, `${split}. <div class="receipt mono">receipt ${rc.receipt_hash.slice(0,18)}&hellip;
+    &middot; outcome ${rc.outcome}</div>`, "ok");
+}
+
+async function runBeat1() {
+  el("go1").disabled = true;
+  try { await beat("steps1", el("brief1").value, 0); }
+  catch(e) { step("steps1", `<span style="color:var(--red)">Failed: ${e.message}</span>`, "err"); }
+  el("go1").disabled = false;
+}
+async function runBeat2() {
+  el("go2").disabled = true;
+  try { await beat("steps2", el("brief2").value, 500); }
+  catch(e) { step("steps2", `<span style="color:var(--red)">Failed: ${e.message}</span>`, "err"); }
+  el("go2").disabled = false;
+}
+
+async function runFailure() {
+  el("go3").disabled = true;
+  const box = "steps3"; el(box).innerHTML = "";
+  try {
+    let dot = step(box, "Setting up a job, approved and authorized&hellip;", "wait");
+    const created = await api("/jobs", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({brief: "audit the top-20 holders, budget $50"})});
+    const jobId = created.job.job_id;
+    const failAgent = created.quote.pay_to;
+    await fetch(`${MOCK}/approve/${created.paypal_order.id}`, {method:"POST"});
+    await api(`/jobs/${jobId}/authorize`, {method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN},
+      body: JSON.stringify({payer: PAYER_ID})});
+    await api(`/jobs/${jobId}/deliver`, {method:"POST",
+      headers:{"Content-Type":"application/json",
+               "Authorization":"Bearer "+AGENTS[failAgent]},
+      body: JSON.stringify({agent: failAgent, delivery_text: DELIVERY})});
+    dot.className = "dot ok";
+
+    dot = step(box, "Telling the mock to <b>drop the next capture response</b>&hellip;", "wait");
+    await fetch(`${MOCK}/drop-next-capture`, {method:"POST"});
+    dot.className = "dot ok";
+
+    dot = step(box, "Capturing &mdash; PayPal took the money, the response never arrived&hellip;", "wait");
+    let failed = false, capResult = null;
+    try {
+      capResult = await api(`/jobs/${jobId}/capture`, {method:"POST",
+        headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN},
+        body: JSON.stringify({payer: PAYER_ID, delivery_text: DELIVERY})});
+    } catch(e) { failed = true; }
+    if (failed) {
+      dot.className = "dot amber";
+      step(box, `<span class="amber">Response lost.</span> Did the capture land? The books don't know.`, "wait");
+      dot = step(box, "Reconciling &mdash; one read, same idempotency key&hellip;", "wait");
+      await api("/admin/reconcile", {method:"POST",
+        headers:{"Content-Type":"application/json","Authorization":"Bearer "+PAYER_TOKEN}});
+      dot.className = "dot ok";
+      const got = await api(`/jobs/${jobId}`);
+      step(box, `Settled <b>exactly once</b>: <span class="money green">${cents(got.receipt.capture_amount_cents)}</span>,
+        no double-pay. <div class="receipt mono">receipt ${got.receipt.receipt_hash.slice(0,18)}&hellip;</div>`, "ok");
+    } else {
+      dot.className = "dot ok";
+      step(box, `The mock dropped the response &mdash; and the service <b>retried on the same
+        idempotency key</b> and settled once anyway. PayPal saw one capture, not two.
+        <div class="receipt mono">receipt ${capResult.receipt.receipt_hash.slice(0,18)}&hellip;</div>`, "ok");
+    }
+    step(box, `<div class="failbox">This is the part fifty other &ldquo;agent pays with PayPal&rdquo;
+      demos don't have: the money moved, the network lied, and the ledger still adds up.</div>`);
+  } catch(e) {
+    step(box, `<span style="color:var(--red)">Failed: ${e.message}</span>`, "err");
+  }
+  el("go3").disabled = false;
+}
+</script>
+</body>
+</html>

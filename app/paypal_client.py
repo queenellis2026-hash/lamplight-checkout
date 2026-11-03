@@ -19,8 +19,8 @@ Credentials come from environment variables only:
 """
 from __future__ import annotations
 
-import base64
 import os
+import re
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -30,12 +30,29 @@ DEFAULT_BASE_URL = "https://api-m.sandbox.paypal.com"
 
 
 class PayPalError(Exception):
-    """A PayPal API call failed; carries the HTTP status and PayPal's body."""
+    """A PayPal API call failed; carries the HTTP status, PayPal's body,
+    and the response headers (Claude Q2: the 429 Retry-After header
+    tells us exactly how long to back off — never guess)."""
 
-    def __init__(self, message: str, status: int | None = None, body=None):
+    def __init__(self, message: str, status: int | None = None, body=None,
+                 headers: dict | None = None):
         super().__init__(message)
         self.status = status
         self.body = body
+        # Response headers, lower-cased for case-insensitive lookup.
+        self.headers: dict[str, str] = {
+            str(k).lower(): str(v) for k, v in (headers or {}).items()}
+
+    @property
+    def retry_after_seconds(self) -> float | None:
+        """PayPal's Retry-After hint on 429 (Claude Q2), else None."""
+        raw = self.headers.get("retry-after")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, float(str(raw).strip()))
+        except (ValueError, TypeError):
+            return None
 
 
 class PayPalConfigError(PayPalError):
@@ -49,17 +66,44 @@ def cents_to_amount(cents: int) -> str:
     return f"{cents // 100}.{cents % 100:02d}"
 
 
+# Round 10: the amount shape, checked before Decimal parses it.
+# Plain digits, optionally a decimal point with one or two places —
+# no sign, no exponent, no words ("Infinity", "NaN"), no empties.
+_AMOUNT_RE = re.compile(r"(?P<int>\d+)(\.\d{1,2})?")
+
+
 def amount_to_cents(value) -> int:
     """"12.50" -> 1250. PayPal returns amounts as decimal strings;
     parse with Decimal so float error (0.10 + 0.20 style) never appears.
     Only strings are accepted (that is what PayPal returns), and only
-    at most two decimal places — anything else raises ValueError."""
+    at most two decimal places — anything else raises ValueError.
+    Round 9 (Oct 28, 2026): negative and non-finite values are also
+    rejected — "-5.00" used to return -500, and "Infinity" raised
+    OverflowError (which _record_capture_amount does not catch), so a
+    malformed PayPal response could escape after PayPal had already
+    captured and leave the job unrecorded.
+    Round 10 (Oct 28, 2026): the round-9 fix was incomplete —
+    "1E+999999" raised decimal.Overflow, which is neither
+    InvalidOperation nor ValueError, so it still escaped the callers
+    (which catch only ValueError) and aborted reconcile_open_jobs.
+    The value is now validated against a strict shape BEFORE Decimal
+    ever sees it — plain digits with at most two decimals — so no
+    exponent, sign, word or empty string can reach the parser, and
+    ArithmeticError is caught as well, so the only failure this
+    function can raise is ValueError. A 16+-digit integer part is
+    also refused: no real PayPal amount is that large, and Decimal's
+    default 28-digit context would silently round one."""
     if not isinstance(value, str):
+        raise ValueError(f"bad PayPal amount: {value!r}")
+    match = _AMOUNT_RE.fullmatch(value)
+    if match is None or len(match.group("int")) > 15:
         raise ValueError(f"bad PayPal amount: {value!r}")
     try:
         cents = Decimal(value) * 100
-    except InvalidOperation as e:
+    except (InvalidOperation, ArithmeticError) as e:
         raise ValueError(f"bad PayPal amount: {value!r}") from e
+    if not cents.is_finite() or cents < 0:
+        raise ValueError(f"bad PayPal amount: {value!r}")
     if cents != cents.to_integral_value():
         raise ValueError(f"bad PayPal amount: {value!r}")
     return int(cents)
@@ -142,7 +186,8 @@ class PayPalClient:
         if resp.status_code == 204:
             return {}
         raise PayPalError(f"{method} {path} failed: {resp.text}",
-                          resp.status_code, resp.text)
+                          resp.status_code, resp.text,
+                          dict(resp.headers))
 
     # -- orders ---------------------------------------------------------------
     def create_order(self, *, amount_cents: int, currency: str = "USD",
@@ -175,6 +220,13 @@ class PayPalClient:
                 "return_url": return_url,
                 "cancel_url": cancel_url,
                 "user_action": "CONTINUE",
+                # Round 10: this is a service, not a shipped good —
+                # tell PayPal not to collect a shipping address, so no
+                # buyer name/address ever enters the authorize response
+                # in the first place. The recorded-response allowlist
+                # (app/escrow.py) is the second layer: a shipping
+                # block PayPal returns anyway is still dropped.
+                "shipping_preference": "NO_SHIPPING",
             },
         }
         return self._request("POST", "/v2/checkout/orders", json=body)
@@ -203,15 +255,21 @@ class PayPalClient:
     def capture_authorization(self, authorization_id: str,
                               amount_cents: int | None = None,
                               currency: str = "USD",
-                              request_id: str | None = None) -> dict:
+                              request_id: str | None = None,
+                              final_capture: bool = False) -> dict:
         """Move held money to the worker agent. Omit amount_cents to capture
         the full authorized amount. `request_id` is PayPal's idempotency
         key: retrying with the same key replays the original capture
-        instead of capturing twice."""
+        instead of capturing twice. `final_capture` tells PayPal this is
+        the last capture against the authorization — any remaining held
+        amount is released automatically (Claude v8.4 review: without it,
+        a partial capture leaves the residual held on real PayPal)."""
         body: dict = {}
         if amount_cents is not None:
             body["amount"] = {"currency_code": currency,
                               "value": cents_to_amount(amount_cents)}
+        if final_capture:
+            body["final_capture"] = True
         return self._request(
             "POST", f"/v2/payments/authorizations/{authorization_id}/capture",
             json=body, request_id=request_id)
@@ -223,3 +281,57 @@ class PayPalClient:
         return self._request(
             "POST", f"/v2/payments/authorizations/{authorization_id}/void",
             json={}, request_id=request_id)
+
+    # -- webhooks -------------------------------------------------------------
+    def verify_webhook_signature(self, *, webhook_id: str,
+                                 transmission_id: str,
+                                 transmission_time: str,
+                                 cert_url: str, auth_algo: str,
+                                 transmission_sig: str,
+                                 webhook_event: dict | bytes) -> bool:
+        """Ask PayPal whether a webhook delivery is genuine
+        (POST /v1/notifications/verify-webhook-signature). The five
+        transmission values come from the delivery's headers, the
+        webhook id identifies the webhook registered in the PayPal
+        dashboard (env LAMPLIGHT_PAYPAL_WEBHOOK_ID), and the event is
+        the delivery's JSON body. Returns True only when PayPal
+        answers verification_status == "SUCCESS" — anything else
+        (FAILURE, or a missing status) is treated as invalid, never
+        as a pass. A transport or HTTP error raises PayPalError, so
+        the caller can answer 503 (PayPal retries the delivery)
+        instead of deciding on an unverified event.
+
+        HIGH #1 (Claude): ``webhook_event`` MUST be the raw delivery
+        bytes in production. PayPal's verification covers the exact
+        original bytes — if we json.loads then re-serialize, key
+        order/spacing/unicode escapes change and genuine deliveries
+        fail verification intermittently. The raw bytes are spliced
+        directly into the request body without re-serialization. A
+        dict is accepted only for tests (it is serialized with
+        sort_keys/separators for determinism, but this is NOT
+        byte-identical to production)."""
+        import json as _json
+        if isinstance(webhook_event, (bytes, bytearray)):
+            raw_event = bytes(webhook_event)
+        else:
+            # Test path only — NOT byte-identical to a real delivery.
+            raw_event = _json.dumps(
+                webhook_event, sort_keys=True,
+                separators=(",", ":")).encode("utf-8")
+        # Splice the raw event bytes directly into the request body —
+        # never re-serialize (Claude HIGH #1).
+        head = _json.dumps({
+            "auth_algo": auth_algo,
+            "cert_url": cert_url,
+            "transmission_id": transmission_id,
+            "transmission_sig": transmission_sig,
+            "transmission_time": transmission_time,
+            "webhook_id": webhook_id,
+        }, sort_keys=True, separators=(",", ":"))
+        # head ends with "}"; replace it with ,"webhook_event":<RAW>}
+        body_bytes = (head[:-1] + ',"webhook_event":').encode("utf-8") \
+            + raw_event + b"}"
+        result = self._request(
+            "POST", "/v1/notifications/verify-webhook-signature",
+            data=body_bytes)
+        return result.get("verification_status") == "SUCCESS"
