@@ -136,6 +136,7 @@ def validate_auth_config() -> None:
         return
     payer_token()
     agent_tokens()
+    storefront_token()
 
 
 def authenticate(request, *, payer_id: str) -> tuple[str, str]:
@@ -172,3 +173,67 @@ def require_agent(request, *, payer_id: str) -> str:
     if role != "agent":
         raise AuthError("this endpoint requires a worker agent", 403)
     return identity
+
+
+# ---------------------------------------------------------------------------
+# Storefront gate (v8.14 demo hardening).
+#
+# POST /jobs and GET /jobs were intentionally unauthenticated (demo scope).
+# The hackathon triage asked for a minimal gate so the endpoints are not
+# completely naked: a shared-secret bearer token, honest about being
+# demo-grade. This is NOT production auth — it only proves the caller was
+# given the token out-of-band. Production needs caller identity, per-caller
+# rate limits, and caller-scoped listings (see server.py module docstring).
+# ---------------------------------------------------------------------------
+
+# Demo-only default. Obvious on purpose — usable only with the explicit
+# LAMPLIGHT_DEMO_AUTH=1 opt-in, same as the payer/agent demo tokens.
+DEMO_STOREFRONT_TOKEN = "demo-storefront-token"
+
+
+def storefront_token() -> str:
+    """The shared secret gating POST /jobs and GET /jobs.
+
+    Real token from ``LAMPLIGHT_DEMO_TOKEN``; the demo default only when
+    the explicit demo opt-in (``LAMPLIGHT_DEMO_AUTH=1``) is set. Raises
+    RuntimeError otherwise — fail fast at boot, same pattern as
+    payer_token()/agent_tokens().
+    """
+    configured = os.environ.get("LAMPLIGHT_DEMO_TOKEN")
+    if configured and configured != DEMO_STOREFRONT_TOKEN:
+        return configured
+    if demo_auth_enabled():
+        return DEMO_STOREFRONT_TOKEN
+    raise RuntimeError(
+        "LAMPLIGHT_DEMO_TOKEN must be set to a real token — refusing to "
+        "start with the demo default. Set LAMPLIGHT_DEMO_AUTH=1 only for "
+        "local demo use."
+    )
+
+
+def require_storefront_token(request) -> None:
+    """Gate for the storefront endpoints (POST /jobs, GET /jobs).
+
+    Accepts the storefront token OR any valid payer/agent bearer token
+    (already-authed callers are not broken by the gate). Raises
+    AuthError(401) for a missing/unknown token.
+
+    Demo-grade and honest about it: a shared secret, not identity.
+    """
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise AuthError("missing Authorization: Bearer <token> "
+                        "(storefront gate)", 401)
+    token = header[len("Bearer "):].strip()
+    if not token:
+        raise AuthError("missing Authorization: Bearer <token> "
+                        "(storefront gate)", 401)
+    if hmac.compare_digest(token, storefront_token()):
+        return
+    # Payer/agent tokens also pass — they are strictly stronger credentials.
+    if hmac.compare_digest(token, payer_token()):
+        return
+    for agent_token in agent_tokens().values():
+        if hmac.compare_digest(token, agent_token):
+            return
+    raise AuthError("unknown bearer token (storefront gate)", 401)

@@ -7,11 +7,15 @@ restart and a previously AUTHORIZED job could never be captured or voided
 again. The store is now pluggable:
 
 * ``MemoryStore`` — plain dict, for tests (the default when no store is
-  passed to EscrowService).
+  passed to EscrowService). Also selectable on the server via
+  ``LAMPLIGHT_STORE=memory`` for ephemeral runs (nothing persisted).
 * ``JsonFileStore`` — one JSON file, rewritten atomically on every save.
-  The server defaults to it, so jobs survive a process restart: a fresh
-  EscrowService on the same file loads the same jobs, with their PayPal
-  ids and statuses intact, and capture/void keep working.
+  Selectable via ``LAMPLIGHT_STORE=json`` or a ``.json`` jobs path.
+  Single-process only. No longer the server default (v8.12).
+* ``SqliteStore`` — SQLite in WAL mode (v8.12: the server default via
+  ``jobs.db``). Multi-process safe; the production path. Selectable via
+  ``LAMPLIGHT_STORE=sqlite`` or a ``.db`` / ``.sqlite`` / ``.sqlite3``
+  jobs path.
 
 Both stores also keep the ids of webhook events already processed
 (``webhook_event_seen`` / ``mark_webhook_event``), so a replayed PayPal
@@ -79,6 +83,24 @@ from .audit import AUDIT_EVENT_MAX
 # see the module docstring. Oldest first evicted, insertion order
 # kept, so the cap is deterministic and survives a reload.
 WEBHOOK_EVENT_ID_MAX = 1000
+
+# Phase 2 (Nov 3, 2026): HTTP-layer idempotency contracts (Stripe model).
+# The Idempotency-Key header lets a client safely retry a mutating POST:
+# same key + same params -> the saved response is replayed; same key +
+# different params -> 422 (client misuse); the key is claimed atomically
+# so concurrent double-POSTs execute exactly once.
+#
+# Record lifecycle: "in_progress" (claimed, handler running) ->
+# "complete" (status + body saved) or "failed" (handler raised; a retry
+# may re-claim and re-execute). A stale in_progress record (older than
+# IDEMPOTENCY_IN_PROGRESS_TIMEOUT_SECONDS) is treated as orphaned — the
+# original requester is gone — and may be re-claimed.
+IDEMPOTENCY_KEY_TTL_SECONDS = 24 * 3600
+IDEMPOTENCY_IN_PROGRESS_TIMEOUT_SECONDS = 60
+# Cap on stored records (same reasoning as WEBHOOK_EVENT_ID_MAX):
+# oldest first evicted. 24h TTL + janitor sweep is the primary expiry;
+# the cap bounds a burst that outruns the sweep.
+IDEMPOTENCY_RECORD_MAX = 2000
 
 
 class _StoreLockBusy(Exception):
@@ -227,6 +249,55 @@ class SqliteStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_events_job"
                 " ON audit_events(job_id, ts);")
+            # Phase 2 (Nov 3, 2026): HTTP idempotency records. One row
+            # per Idempotency-Key: the claim lifecycle is in_progress ->
+            # complete/failed, and the saved response is replayed on
+            # retry. request_fingerprint detects same-key-different-
+            # params (422). expires_at drives the janitor sweep.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS idempotency_records ("
+                " key TEXT PRIMARY KEY,"
+                " fingerprint TEXT NOT NULL,"
+                " state TEXT NOT NULL,"
+                " created_at INTEGER NOT NULL,"
+                " updated_at INTEGER NOT NULL,"
+                " expires_at INTEGER NOT NULL,"
+                " status_code INTEGER,"
+                " response_body TEXT"
+                ")")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_idempotency_expires"
+                " ON idempotency_records(expires_at);")
+            # Phase 4 (property-testing game plan): nightly
+            # reconciliation. reconciliation_runs records each scheduled
+            # run; reconciliation_findings persists one row per (job_id,
+            # issue_type) divergence. Alert dedupe keys on open findings
+            # with the same (job_id, issue_type) — a repeat offender
+            # does not page twice.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
+                " run_id TEXT PRIMARY KEY,"
+                " started_at INTEGER NOT NULL,"
+                " finished_at INTEGER,"
+                " jobs_checked INTEGER NOT NULL DEFAULT 0,"
+                " divergent_count INTEGER NOT NULL DEFAULT 0,"
+                " status TEXT NOT NULL"
+                ")")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS reconciliation_findings ("
+                " finding_id TEXT PRIMARY KEY,"
+                " run_id TEXT NOT NULL,"
+                " job_id TEXT NOT NULL,"
+                " issue_type TEXT NOT NULL,"
+                " detail TEXT,"
+                " first_seen INTEGER NOT NULL,"
+                " status TEXT NOT NULL,"
+                " resolved_at INTEGER,"
+                " note TEXT"
+                ")")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recon_findings_job_type"
+                " ON reconciliation_findings(job_id, issue_type, status);")
             conn.commit()
         finally:
             conn.close()
@@ -524,6 +595,147 @@ class SqliteStore:
         finally:
             conn.close()
 
+    # Phase 4 (property-testing game plan): nightly reconciliation
+    # persistence. Runs and findings are stored durably alongside the
+    # jobs so a restart never loses the alert-dedupe state.
+
+    _RECON_RUN_COLS = ("run_id, started_at, finished_at,"
+                       " jobs_checked, divergent_count, status")
+    _RECON_FINDING_COLS = ("finding_id, run_id, job_id, issue_type,"
+                           " detail, first_seen, status, resolved_at, note")
+
+    @staticmethod
+    def _row_to_recon_run(r) -> dict:
+        return {"run_id": r[0], "started_at": r[1], "finished_at": r[2],
+                "jobs_checked": r[3], "divergent_count": r[4],
+                "status": r[5]}
+
+    @staticmethod
+    def _row_to_recon_finding(r) -> dict:
+        return {"finding_id": r[0], "run_id": r[1], "job_id": r[2],
+                "issue_type": r[3], "detail": r[4], "first_seen": r[5],
+                "status": r[6], "resolved_at": r[7], "note": r[8]}
+
+    def record_reconciliation_run(self, run: dict) -> None:
+        """Insert or replace a reconciliation run record."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO reconciliation_runs"
+                    f" ({self._RECON_RUN_COLS})"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (run["run_id"], run["started_at"],
+                     run.get("finished_at"), run.get("jobs_checked", 0),
+                     run.get("divergent_count", 0), run["status"]))
+        finally:
+            conn.close()
+
+    def get_reconciliation_runs(self, limit: int | None = None) -> list[dict]:
+        """Reconciliation runs, newest first."""
+        conn = self._connect()
+        try:
+            sql = ("SELECT " + self._RECON_RUN_COLS
+                   + " FROM reconciliation_runs"
+                   " ORDER BY started_at DESC, rowid DESC")
+            args: list = []
+            if limit is not None:
+                sql += " LIMIT ?"
+                args.append(limit)
+            return [self._row_to_recon_run(r)
+                    for r in conn.execute(sql, args).fetchall()]
+        finally:
+            conn.close()
+
+    def record_reconciliation_finding(self, finding: dict) -> None:
+        """Insert or replace a reconciliation finding."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO reconciliation_findings"
+                    f" ({self._RECON_FINDING_COLS})"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (finding["finding_id"], finding["run_id"],
+                     finding["job_id"], finding["issue_type"],
+                     finding.get("detail"), finding["first_seen"],
+                     finding["status"], finding.get("resolved_at"),
+                     finding.get("note")))
+        finally:
+            conn.close()
+
+    def find_open_finding(self, job_id: str,
+                          issue_type: str) -> dict | None:
+        """The open finding for (job_id, issue_type), if any.
+
+        Alert dedupe keys on this: a repeat offender does not page
+        twice while its finding is still open.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT " + self._RECON_FINDING_COLS
+                + " FROM reconciliation_findings"
+                " WHERE job_id = ? AND issue_type = ?"
+                " AND status = 'open' ORDER BY first_seen DESC LIMIT 1",
+                (job_id, issue_type)).fetchone()
+            return self._row_to_recon_finding(row) if row else None
+        finally:
+            conn.close()
+
+    def get_reconciliation_finding(self, finding_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT " + self._RECON_FINDING_COLS
+                + " FROM reconciliation_findings WHERE finding_id = ?",
+                (finding_id,)).fetchone()
+            return self._row_to_recon_finding(row) if row else None
+        finally:
+            conn.close()
+
+    def update_reconciliation_finding(self, finding_id: str, *,
+                                      status: str, note: str | None = None,
+                                      resolved_at: int | None = None) -> dict | None:
+        """Ack or resolve a finding. Returns the updated finding, or
+        None when the finding does not exist."""
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT " + self._RECON_FINDING_COLS
+                    + " FROM reconciliation_findings WHERE finding_id = ?",
+                    (finding_id,)).fetchone()
+                if row is None:
+                    return None
+                conn.execute(
+                    "UPDATE reconciliation_findings"
+                    " SET status = ?, note = ?, resolved_at = ?"
+                    " WHERE finding_id = ?",
+                    (status, note, resolved_at, finding_id))
+                return self._row_to_recon_finding(
+                    (row[0], row[1], row[2], row[3], row[4], row[5],
+                     status, resolved_at, note))
+        finally:
+            conn.close()
+
+    def list_reconciliation_findings(self,
+                                     status: str | None = None) -> list[dict]:
+        """Findings, newest first. status=None returns all."""
+        conn = self._connect()
+        try:
+            sql = ("SELECT " + self._RECON_FINDING_COLS
+                   + " FROM reconciliation_findings")
+            args: list = []
+            if status is not None:
+                sql += " WHERE status = ?"
+                args.append(status)
+            sql += " ORDER BY first_seen DESC, rowid DESC"
+            return [self._row_to_recon_finding(r)
+                    for r in conn.execute(sql, args).fetchall()]
+        finally:
+            conn.close()
+
     def mark_webhook_event(self, event_id: str) -> None:
         conn = self._connect()
         try:
@@ -552,6 +764,117 @@ class SqliteStore:
         finally:
             conn.close()
 
+    # Phase 2 (Nov 3, 2026): HTTP idempotency records. The claim is the
+    # concurrency control: exactly one requester wins the atomic INSERT
+    # and executes; losers replay the winner's saved response.
+    #
+    # Returns one of:
+    #   ("claimed",)                       — this caller executes
+    #   ("replay", status_code, body)      — key seen, same fingerprint
+    #   ("conflict",)                      — key seen, different fingerprint
+    #   ("in_progress",)                   — another request is executing now
+    def claim_idempotency_key(self, key: str, fingerprint: str,
+                              ttl_seconds: int, now: int) -> tuple:
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT fingerprint, state, updated_at, status_code,"
+                    " response_body FROM idempotency_records WHERE key = ?",
+                    (key,)).fetchone()
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO idempotency_records"
+                        " (key, fingerprint, state, created_at, updated_at,"
+                        "  expires_at, status_code, response_body)"
+                        " VALUES (?, ?, 'in_progress', ?, ?, ?, NULL, NULL)",
+                        (key, fingerprint, now, now,
+                         now + ttl_seconds))
+                    self._evict_idempotency_records(conn)
+                    return ("claimed",)
+                (fp, state, updated_at,
+                 status_code, response_body) = row
+                if state == "complete":
+                    if fp == fingerprint:
+                        return ("replay", status_code, response_body)
+                    return ("conflict",)
+                if state == "failed":
+                    # A failed handler left the key behind; the retry
+                    # re-claims and re-executes (never replays a 500).
+                    conn.execute(
+                        "UPDATE idempotency_records SET fingerprint = ?,"
+                        " state = 'in_progress', updated_at = ?,"
+                        " expires_at = ?, status_code = NULL,"
+                        " response_body = NULL WHERE key = ?",
+                        (fingerprint, now, now + ttl_seconds, key))
+                    return ("claimed",)
+                # state == "in_progress": fresh means someone is
+                # executing now; stale means the requester died.
+                if now - updated_at < IDEMPOTENCY_IN_PROGRESS_TIMEOUT_SECONDS:
+                    return ("in_progress",)
+                conn.execute(
+                    "UPDATE idempotency_records SET fingerprint = ?,"
+                    " state = 'in_progress', updated_at = ?,"
+                    " expires_at = ? WHERE key = ?",
+                    (fingerprint, now, now + ttl_seconds, key))
+                return ("claimed",)
+        finally:
+            conn.close()
+
+    def complete_idempotency_key(self, key: str, status_code: int,
+                                 response_body: str, now: int) -> None:
+        """Save the handler's response for replay. Only the claim
+        winner calls this; it is a no-op if the key is gone."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE idempotency_records SET state = 'complete',"
+                    " updated_at = ?, status_code = ?,"
+                    " response_body = ? WHERE key = ?"
+                    " AND state = 'in_progress'",
+                    (now, status_code, response_body, key))
+        finally:
+            conn.close()
+
+    def fail_idempotency_key(self, key: str, now: int) -> None:
+        """Mark the claim failed (handler raised). A retry with the
+        same key re-claims and re-executes; nothing is replayed."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE idempotency_records SET state = 'failed',"
+                    " updated_at = ? WHERE key = ?"
+                    " AND state = 'in_progress'",
+                    (now, key))
+        finally:
+            conn.close()
+
+    def delete_expired_idempotency_records(self, now: int) -> int:
+        """Janitor sweep: delete records past expires_at. Returns the
+        number removed."""
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "DELETE FROM idempotency_records WHERE expires_at <= ?",
+                    (now,))
+                return cur.rowcount or 0
+        finally:
+            conn.close()
+
+    def _evict_idempotency_records(self, conn) -> None:
+        """Cap the table: oldest first evicted (same pattern as the
+        webhook event cap). Caller holds the transaction."""
+        conn.execute(
+            "DELETE FROM idempotency_records WHERE key IN ("
+            " SELECT key FROM idempotency_records"
+            " ORDER BY created_at ASC"
+            " LIMIT max(0, (SELECT COUNT(*) FROM idempotency_records)"
+            " - ?))",
+            (IDEMPOTENCY_RECORD_MAX,))
+
 
 def _is_sqlite_path(path: pathlib.Path) -> bool:
     return path.suffix.lower() in (".db", ".sqlite", ".sqlite3")
@@ -560,10 +883,21 @@ def _is_sqlite_path(path: pathlib.Path) -> bool:
 def make_store(path: str | pathlib.Path | None = None):
     """Build the configured job store.
 
-    SQLite when ``LAMPLIGHT_STORE=sqlite`` or the jobs path ends in
-    ``.db``/``.sqlite``/``.sqlite3``; otherwise JsonFileStore.
+    v8.12 selection order:
+    1. ``LAMPLIGHT_STORE=memory`` → MemoryStore (ephemeral, nothing
+       persisted; for tests and throwaway runs).
+    2. ``LAMPLIGHT_STORE=sqlite`` or the jobs path ends in
+       ``.db``/``.sqlite``/``.sqlite3`` → SqliteStore (the default;
+       multi-process safe).
+    3. ``LAMPLIGHT_STORE=json`` or any other path → JsonFileStore
+       (legacy single-process store).
+    Returns None when no path is configured — caller decides (tests
+    use MemoryStore via EscrowService's default).
     """
     import os as _os
+    store_opt = _os.environ.get("LAMPLIGHT_STORE", "").strip().lower()
+    if store_opt == "memory":
+        return MemoryStore()
     if path is None:
         override = _os.environ.get("LAMPLIGHT_JOBS_FILE")
         path = pathlib.Path(override) if override else None
@@ -571,8 +905,11 @@ def make_store(path: str | pathlib.Path | None = None):
         # No path configured — caller decides (tests use MemoryStore).
         return None
     path = pathlib.Path(path)
-    if (_os.environ.get("LAMPLIGHT_STORE", "").strip().lower() == "sqlite"
-            or _is_sqlite_path(path)):
+    # Explicit opt-out beats the path suffix: LAMPLIGHT_STORE=json forces
+    # the legacy store even on a .db path (and vice versa for sqlite).
+    if store_opt == "json":
+        return JsonFileStore(path)
+    if store_opt == "sqlite" or _is_sqlite_path(path):
         return SqliteStore(path)
     return JsonFileStore(path)
 
@@ -590,6 +927,9 @@ class MemoryStore:
         self._webhook_claims: dict[str, tuple[str, int]] = {}
         # v8.2 (item 6): structured audit events, insertion-ordered.
         self._audit_events: list[dict] = []
+        # Phase 4: reconciliation runs and findings, insertion-ordered.
+        self._recon_runs: list[dict] = []
+        self._recon_findings: dict[str, dict] = {}
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
@@ -642,6 +982,84 @@ class MemoryStore:
         state = "completed" if completed else "failed"
         self._webhook_claims[event_id] = (state, int(time.time()))
 
+    # Phase 2 (Nov 3, 2026): HTTP idempotency records (in-memory).
+    # Same contract as SqliteStore.claim_idempotency_key — see there
+    # for the return-value protocol. The GIL makes the check-and-set
+    # atomic for threads; single-process only.
+
+    def _idem_store(self) -> dict:
+        if not hasattr(self, "_idempotency_records"):
+            # key -> [fingerprint, state, created_at, updated_at,
+            #          expires_at, status_code, response_body]
+            self._idempotency_records = {}
+        return self._idempotency_records
+
+    def claim_idempotency_key(self, key: str, fingerprint: str,
+                              ttl_seconds: int, now: int) -> tuple:
+        import threading
+        if not hasattr(self, "_idem_lock"):
+            self._idem_lock = threading.Lock()
+        with self._idem_lock:
+            recs = self._idem_store()
+            rec = recs.get(key)
+            if rec is None:
+                recs[key] = [fingerprint, "in_progress", now, now,
+                             now + ttl_seconds, None, None]
+                self._evict_idempotency_records()
+                return ("claimed",)
+            fp, state, _created, updated_at, _exp, status_code, body = rec
+            if state == "complete":
+                if fp == fingerprint:
+                    return ("replay", status_code, body)
+                return ("conflict",)
+            if state == "failed":
+                rec[0] = fingerprint
+                rec[1] = "in_progress"
+                rec[3] = now
+                rec[4] = now + ttl_seconds
+                rec[5] = None
+                rec[6] = None
+                return ("claimed",)
+            if now - updated_at < IDEMPOTENCY_IN_PROGRESS_TIMEOUT_SECONDS:
+                return ("in_progress",)
+            rec[0] = fingerprint
+            rec[1] = "in_progress"
+            rec[3] = now
+            rec[4] = now + ttl_seconds
+            return ("claimed",)
+
+    def complete_idempotency_key(self, key: str, status_code: int,
+                                 response_body: str, now: int) -> None:
+        recs = self._idem_store()
+        rec = recs.get(key)
+        if rec is not None and rec[1] == "in_progress":
+            rec[1] = "complete"
+            rec[3] = now
+            rec[5] = status_code
+            rec[6] = response_body
+
+    def fail_idempotency_key(self, key: str, now: int) -> None:
+        recs = self._idem_store()
+        rec = recs.get(key)
+        if rec is not None and rec[1] == "in_progress":
+            rec[1] = "failed"
+            rec[3] = now
+
+    def delete_expired_idempotency_records(self, now: int) -> int:
+        recs = self._idem_store()
+        expired = [k for k, r in recs.items() if r[4] <= now]
+        for k in expired:
+            del recs[k]
+        return len(expired)
+
+    def _evict_idempotency_records(self) -> None:
+        recs = self._idem_store()
+        overflow = len(recs) - IDEMPOTENCY_RECORD_MAX
+        if overflow > 0:
+            # Oldest first (insertion order).
+            for k in list(recs.keys())[:overflow]:
+                del recs[k]
+
     # v8.2 (production-readiness item 6): structured audit events.
 
     def append_audit_event(self, event: dict) -> None:
@@ -658,6 +1076,66 @@ class MemoryStore:
         if limit is not None:
             events = events[:limit]
         return copy.deepcopy(events)
+
+    # Phase 4 (property-testing game plan): nightly reconciliation
+    # persistence. Same contract as SqliteStore; see it for the
+    # alert-dedupe semantics on find_open_finding.
+
+    def record_reconciliation_run(self, run: dict) -> None:
+        import copy
+        self._recon_runs = [r for r in self._recon_runs
+                            if r["run_id"] != run["run_id"]]
+        self._recon_runs.append(copy.deepcopy(run))
+
+    def get_reconciliation_runs(self, limit: int | None = None) -> list[dict]:
+        import copy
+        runs = sorted(self._recon_runs,
+                      key=lambda r: (r["started_at"], r["run_id"]),
+                      reverse=True)
+        if limit is not None:
+            runs = runs[:limit]
+        return copy.deepcopy(runs)
+
+    def record_reconciliation_finding(self, finding: dict) -> None:
+        import copy
+        self._recon_findings[finding["finding_id"]] = copy.deepcopy(finding)
+
+    def find_open_finding(self, job_id: str,
+                          issue_type: str) -> dict | None:
+        import copy
+        for f in self._recon_findings.values():
+            if (f["job_id"] == job_id and f["issue_type"] == issue_type
+                    and f["status"] == "open"):
+                return copy.deepcopy(f)
+        return None
+
+    def get_reconciliation_finding(self, finding_id: str) -> dict | None:
+        import copy
+        f = self._recon_findings.get(finding_id)
+        return copy.deepcopy(f) if f is not None else None
+
+    def update_reconciliation_finding(self, finding_id: str, *,
+                                      status: str, note: str | None = None,
+                                      resolved_at: int | None = None) -> dict | None:
+        import copy
+        f = self._recon_findings.get(finding_id)
+        if f is None:
+            return None
+        f = copy.deepcopy(f)
+        f["status"] = status
+        f["note"] = note
+        f["resolved_at"] = resolved_at
+        self._recon_findings[finding_id] = f
+        return copy.deepcopy(f)
+
+    def list_reconciliation_findings(self,
+                                     status: str | None = None) -> list[dict]:
+        import copy
+        findings = [f for f in self._recon_findings.values()
+                    if status is None or f["status"] == status]
+        findings.sort(key=lambda f: (f["first_seen"], f["finding_id"]),
+                      reverse=True)
+        return copy.deepcopy(findings)
 
 
 class JsonFileStore:
@@ -690,6 +1168,16 @@ class JsonFileStore:
         # Loaded from disk in _read_from_disk; files written before v8.2
         # load as empty.
         self._webhook_claims: dict[str, tuple[str, int]] = {}
+        # Phase 2 (Nov 3, 2026): HTTP idempotency records — key ->
+        # [fingerprint, state, created_at, updated_at, expires_at,
+        #  status_code, response_body]. Loaded from disk; files written
+        # before Phase 2 load as empty.
+        self._idempotency_records: dict[str, list] = {}
+        # Phase 4: reconciliation runs and findings. Loaded from disk
+        # in _read_from_disk; files written before Phase 4 load as
+        # empty.
+        self._recon_runs: list[dict] = []
+        self._recon_findings: dict[str, dict] = {}
         # v8.2 (item 6): structured audit events, insertion-ordered.
         # Loaded from disk in _read_from_disk; files written before
         # v8.2 load as empty. Capped at AUDIT_EVENT_MAX, oldest first
@@ -724,6 +1212,12 @@ class JsonFileStore:
         self._jobs = {}
         self._webhook_events = []
         self._audit_events = []
+        self._idempotency_records = {}
+        # Phase 4: reconciliation runs (insertion-ordered) and
+        # findings (finding_id -> dict). Files written before Phase 4
+        # load as empty.
+        self._recon_runs = []
+        self._recon_findings = {}
         self._stamp = self._disk_stamp()
         if self.path.exists():
             raw = self.path.read_text()
@@ -753,6 +1247,19 @@ class JsonFileStore:
             self._webhook_claims = {
                 eid: (str(st), int(ts))
                 for eid, (st, ts) in data.get("webhook_claims", {}).items()
+            }
+            # Phase 2 (Nov 3, 2026): HTTP idempotency records.
+            self._idempotency_records = {
+                k: [str(fp), str(st), int(ca), int(ua), int(ex),
+                    sc, body]
+                for k, (fp, st, ca, ua, ex, sc,
+                        body) in data.get("idempotency_records", {}).items()
+            }
+            # Phase 4: reconciliation runs and findings.
+            self._recon_runs = list(data.get("reconciliation_runs", []))
+            self._recon_findings = {
+                str(fid): dict(f)
+                for fid, f in data.get("reconciliation_findings", {}).items()
             }
 
     def get(self, job_id: str) -> Job | None:
@@ -839,6 +1346,91 @@ class JsonFileStore:
                 self._webhook_claims[event_id] = (state, int(time.time()))
                 self._write_locked()
 
+    # Phase 2 (Nov 3, 2026): HTTP idempotency records. Same contract
+    # as SqliteStore.claim_idempotency_key — see there for the
+    # return-value protocol. Read-modify-write under the cross-process
+    # file lock, like save/delete.
+
+    def claim_idempotency_key(self, key: str, fingerprint: str,
+                              ttl_seconds: int, now: int) -> tuple:
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                rec = self._idempotency_records.get(key)
+                if rec is None:
+                    self._idempotency_records[key] = [
+                        fingerprint, "in_progress", now, now,
+                        now + ttl_seconds, None, None]
+                    self._evict_idempotency_records()
+                    self._write_locked()
+                    return ("claimed",)
+                fp, state, _created, updated_at, _exp, status_code, body = rec
+                if state == "complete":
+                    if fp == fingerprint:
+                        return ("replay", status_code, body)
+                    return ("conflict",)
+                if state == "failed":
+                    rec[0] = fingerprint
+                    rec[1] = "in_progress"
+                    rec[3] = now
+                    rec[4] = now + ttl_seconds
+                    rec[5] = None
+                    rec[6] = None
+                    self._write_locked()
+                    return ("claimed",)
+                if now - updated_at < IDEMPOTENCY_IN_PROGRESS_TIMEOUT_SECONDS:
+                    return ("in_progress",)
+                rec[0] = fingerprint
+                rec[1] = "in_progress"
+                rec[3] = now
+                rec[4] = now + ttl_seconds
+                self._write_locked()
+                return ("claimed",)
+
+    def complete_idempotency_key(self, key: str, status_code: int,
+                                 response_body: str, now: int) -> None:
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                rec = self._idempotency_records.get(key)
+                if rec is not None and rec[1] == "in_progress":
+                    rec[1] = "complete"
+                    rec[3] = now
+                    rec[5] = status_code
+                    rec[6] = response_body
+                    self._write_locked()
+
+    def fail_idempotency_key(self, key: str, now: int) -> None:
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                rec = self._idempotency_records.get(key)
+                if rec is not None and rec[1] == "in_progress":
+                    rec[1] = "failed"
+                    rec[3] = now
+                    self._write_locked()
+
+    def delete_expired_idempotency_records(self, now: int) -> int:
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                expired = [k for k, r in self._idempotency_records.items()
+                           if r[4] <= now]
+                for k in expired:
+                    del self._idempotency_records[k]
+                if expired:
+                    self._write_locked()
+                return len(expired)
+
+    def _evict_idempotency_records(self) -> None:
+        """Cap the records: oldest first evicted. Caller holds the
+        lock and the file lock, and writes after."""
+        recs = self._idempotency_records
+        overflow = len(recs) - IDEMPOTENCY_RECORD_MAX
+        if overflow > 0:
+            for k in list(recs.keys())[:overflow]:
+                del recs[k]
+
     # v8.2 (production-readiness item 6): structured audit events.
     # Durable in the JSON payload, capped oldest-first at
     # AUDIT_EVENT_MAX (see _write_locked).
@@ -894,6 +1486,91 @@ class JsonFileStore:
                 events = events[:limit]
             return copy.deepcopy(events)
 
+    # Phase 4 (property-testing game plan): nightly reconciliation
+    # persistence. Full read-modify-write under both locks (the save()
+    # pattern) — reconciliation writes are nightly, not hot-path, so
+    # the object-identity concern that motivated append_audit_event's
+    # surgical update does not apply.
+
+    def record_reconciliation_run(self, run: dict) -> None:
+        import copy
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                self._recon_runs = [
+                    r for r in self._recon_runs
+                    if r["run_id"] != run["run_id"]]
+                self._recon_runs.append(copy.deepcopy(run))
+                self._write_locked()
+
+    def get_reconciliation_runs(self, limit: int | None = None) -> list[dict]:
+        import copy
+        with self._lock:
+            self._refresh_if_changed()
+            runs = sorted(self._recon_runs,
+                          key=lambda r: (r["started_at"], r["run_id"]),
+                          reverse=True)
+            if limit is not None:
+                runs = runs[:limit]
+            return copy.deepcopy(runs)
+
+    def record_reconciliation_finding(self, finding: dict) -> None:
+        import copy
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                self._recon_findings[finding["finding_id"]] = \
+                    copy.deepcopy(finding)
+                self._write_locked()
+
+    def find_open_finding(self, job_id: str,
+                          issue_type: str) -> dict | None:
+        import copy
+        with self._lock:
+            self._refresh_if_changed()
+            for f in self._recon_findings.values():
+                if (f["job_id"] == job_id
+                        and f["issue_type"] == issue_type
+                        and f["status"] == "open"):
+                    return copy.deepcopy(f)
+            return None
+
+    def get_reconciliation_finding(self, finding_id: str) -> dict | None:
+        import copy
+        with self._lock:
+            self._refresh_if_changed()
+            f = self._recon_findings.get(finding_id)
+            return copy.deepcopy(f) if f is not None else None
+
+    def update_reconciliation_finding(self, finding_id: str, *,
+                                      status: str, note: str | None = None,
+                                      resolved_at: int | None = None) -> dict | None:
+        import copy
+        with self._lock:
+            with self._file_lock:
+                self._read_from_disk()
+                f = self._recon_findings.get(finding_id)
+                if f is None:
+                    return None
+                f = copy.deepcopy(f)
+                f["status"] = status
+                f["note"] = note
+                f["resolved_at"] = resolved_at
+                self._recon_findings[finding_id] = f
+                self._write_locked()
+                return copy.deepcopy(f)
+
+    def list_reconciliation_findings(self,
+                                     status: str | None = None) -> list[dict]:
+        import copy
+        with self._lock:
+            self._refresh_if_changed()
+            findings = [f for f in self._recon_findings.values()
+                        if status is None or f["status"] == status]
+            findings.sort(key=lambda f: (f["first_seen"], f["finding_id"]),
+                          reverse=True)
+            return copy.deepcopy(findings)
+
     def _write_locked(self) -> None:
         """Rewrite the whole file atomically. Caller must hold the lock.
         Round 11: the temp file is fsynced before the rename and the
@@ -913,7 +1590,15 @@ class JsonFileStore:
                    "audit_events": list(self._audit_events[-AUDIT_EVENT_MAX:]),
                    # v8.2 (item 3): webhook claims.
                    "webhook_claims": {eid: [st, ts] for eid, (st, ts)
-                                      in self._webhook_claims.items()}}
+                                      in self._webhook_claims.items()},
+                   # Phase 2 (Nov 3, 2026): HTTP idempotency records.
+                   "idempotency_records": {
+                       k: [fp, st, ca, ua, ex, sc, body]
+                       for k, (fp, st, ca, ua, ex, sc,
+                               body) in self._idempotency_records.items()},
+                   # Phase 4: reconciliation runs and findings.
+                   "reconciliation_runs": list(self._recon_runs),
+                   "reconciliation_findings": dict(self._recon_findings)}
         with open(tmp, "w") as f:
             f.write(json.dumps(payload, indent=2, sort_keys=True))
             f.flush()

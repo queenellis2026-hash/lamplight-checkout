@@ -57,6 +57,10 @@ def client(mock_server):
     flask_app.config["escrow"] = EscrowService(
         PayPalClient(client_id="mock", client_secret="mock", base_url=mock_server))
     flask_app.config["TESTING"] = True
+    flask_app.config["BYPASS_ORDER_BUDGET"] = True  # v8.14: the
+    # Create Order budget is no longer bypassed by TESTING alone
+    # (Grok latest) — fixtures opt in explicitly so the
+    # budget-path tests can drive the real bucket.
     return flask_app.test_client()
 
 
@@ -1033,8 +1037,11 @@ def test_webhook_end_to_end_through_mock_sender_into_live_server(mock_server, tm
             raise RuntimeError("live server did not come up")
 
         # The whole flow over real HTTP against the live server.
+        # v8.14: the storefront gate is live here (not TESTING mode) —
+        # the payer token passes the gate.
         r = requests.post(f"{live}/jobs",
                           json={"brief": "audit the top-20 holders, budget $50"},
+                          headers=PAYER_H,
                           timeout=10)
         assert r.status_code == 201, r.text
         body = r.json()
@@ -1387,3 +1394,215 @@ def test_boot_refuses_multi_worker():
         for var in ("WEB_CONCURRENCY", "GUNICORN_WORKERS", "LAMPLIGHT_WORKERS"):
             os.environ.pop(var, None)
         srv._refuse_multi_worker()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# v8.12 (Nov 3, 2026): POST /jobs/<id>/dispute — payer-filed dispute,
+# the missing half of the 48h inspection window.
+# ---------------------------------------------------------------------------
+
+def test_dispute_requires_payer_token(client):
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "work is wrong"})
+    assert r.status_code == 401
+
+
+def test_dispute_rejects_wrong_payer_field(client):
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": "mallory@example", "reason": "work is wrong"},
+                    headers=PAYER_H)
+    assert r.status_code == 403
+
+
+def test_dispute_requires_reason(client):
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER}, headers=PAYER_H)
+    assert r.status_code == 400
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "  "}, headers=PAYER_H)
+    assert r.status_code == 409  # empty reason rejected by the service
+
+
+def test_dispute_rejects_non_delivered_job(client):
+    body = _create_job(client, brief="write a research summary, budget $20")
+    job_id = body["job"]["job_id"]
+    _approve_and_authorize(client, job_id, body["paypal_order"]["id"])
+    # AUTHORIZED, not DELIVERED — nothing to dispute yet.
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "too slow"},
+                    headers=PAYER_H)
+    assert r.status_code == 409
+    assert "DELIVERED" in r.get_json()["error"]
+
+
+def test_dispute_flow_over_http(client):
+    """v8.12: the payer disputes a DELIVERED job — 200, needs_review set,
+    auto-capture blocked, and the reason is on the record."""
+    from app.server import app as flask_app
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "delivery does not match the brief"},
+                    headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    data = r.get_json()
+    assert data["dispute"]["needs_review"] is True
+    assert data["dispute"]["reason"] == "delivery does not match the brief"
+    # to_public_dict() deliberately excludes needs_review (v8.2 F3) —
+    # verify the flag on the stored job instead.
+    # The sweeper's auto-capture must skip this job.
+    svc = flask_app.config["escrow"]
+    job = svc.get_job(job_id)
+    assert job.needs_review is True
+    assert "payer pause" in job.needs_review_reason
+
+
+def test_dispute_rejects_double_dispute(client):
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "first"},
+                    headers=PAYER_H)
+    assert r.status_code == 200
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "second"},
+                    headers=PAYER_H)
+    assert r.status_code == 409
+    assert "already under review" in r.get_json()["error"]
+
+
+def test_dispute_blocks_auto_capture(client):
+    """v8.13: a disputed job is skipped by check_inspection_deadlines
+    WHILE the dispute is under review — the point of the endpoint.
+    (v8.12 asserted the skip was forever; v8.13 gives the dispute a
+    deadline, after which the sweeper captures. See
+    tests/test_v813_dispute_deadline.py for the deadline behavior.)"""
+    import time
+    from app.server import app as flask_app
+    job_id = _delivered_job(client)
+    svc = flask_app.config["escrow"]
+    job = svc.get_job(job_id)
+    # Force the inspection deadline into the past.
+    job.inspection_deadline = 1
+    svc._save(job)
+    # Dispute it.
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "not what I asked for"},
+                    headers=PAYER_H)
+    assert r.status_code == 200
+    # One hour into the review window the sweep must not capture it.
+    captured = svc.check_inspection_deadlines(now=int(time.time()) + 3600)
+    assert job_id not in captured
+    assert svc.get_job(job_id).status == "DELIVERED"
+
+
+# ---------------------------------------------------------------------------
+# v8.14 (Grok latest, fix 2): Create Order budget is checked BEFORE the
+# job row is written; take() is locked; the suite no longer bypasses
+# via app.testing.
+# ---------------------------------------------------------------------------
+
+def test_order_budget_429_writes_no_row(client, monkeypatch):
+    """A 429 from the Create Order budget must not leave an orphaned
+    QUOTED job with no order. The old order (create row, then check)
+    wrote one orphan per rejected request, and orphans counted toward
+    MAX_OPEN_JOBS until the quote expired."""
+    import app.server as srv
+    # Fresh 1-token bucket, already spent.
+    fresh = srv._CreateOrderBudget(1)
+    assert fresh.take() is True
+    monkeypatch.setattr(srv, "_order_budget", fresh)
+    # Drive the real bucket for this test (the fixture bypasses it).
+    monkeypatch.setitem(flask_app.config, "BYPASS_ORDER_BUDGET", False)
+    r = client.post("/jobs",
+                    json={"brief": "audit the top-20 holders, budget $50"})
+    assert r.status_code == 429, r.get_json()
+    assert r.headers.get("Retry-After") == "60"
+    svc = flask_app.config["escrow"]
+    orphans = [j for j in svc.jobs.values()
+               if j.status == "QUOTED" and not j.order_id]
+    assert orphans == []
+
+
+def test_order_budget_take_is_thread_safe():
+    """take()'s check-then-act raced: two concurrent requests could
+    both see tokens >= 1 and both spend. With the lock and a frozen
+    clock, 200 takes across 10 threads grant exactly capacity."""
+    import threading
+    import app.server as srv
+    budget = srv._CreateOrderBudget(5, _clock=lambda: 0.0)
+    granted = []
+    granted_lock = threading.Lock()
+
+    def worker():
+        local = 0
+        for _ in range(20):
+            if budget.take():
+                local += 1
+        with granted_lock:
+            granted.append(local)
+
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(granted) == 5
+
+
+# ---------------------------------------------------------------------------
+# v8.14 (Grok latest): operator exits on the API; authenticated reads.
+# ---------------------------------------------------------------------------
+
+def test_clear_review_flag_route_is_payer_gated(client):
+    """POST /jobs/<id>/clear-review-flag exists and requires the payer."""
+    data = _create_job(client)
+    job_id = data["job"]["job_id"]
+    # No token -> 401.
+    r = client.post(f"/jobs/{job_id}/clear-review-flag",
+                    json={"payer": PAYER})
+    assert r.status_code == 401, r.get_json()
+    # Payer token, but the job is not flagged -> 409, not 404/500.
+    r = client.post(f"/jobs/{job_id}/clear-review-flag",
+                    json={"payer": PAYER}, headers=PAYER_H)
+    assert r.status_code == 409, r.get_json()
+    assert "not flagged" in r.get_json()["error"]
+
+
+def test_cancel_pending_capture_route_is_payer_gated(client):
+    """POST /jobs/<id>/cancel-pending-capture exists and requires the payer."""
+    data = _create_job(client)
+    job_id = data["job"]["job_id"]
+    # No token -> 401.
+    r = client.post(f"/jobs/{job_id}/cancel-pending-capture",
+                    json={"payer": PAYER})
+    assert r.status_code == 401, r.get_json()
+    # Payer token, but no capture is pending -> 409.
+    r = client.post(f"/jobs/{job_id}/cancel-pending-capture",
+                    json={"payer": PAYER}, headers=PAYER_H)
+    assert r.status_code == 409, r.get_json()
+    assert "no capture is pending" in r.get_json()["error"]
+
+
+def test_get_job_authenticated_sees_pause_fields(client):
+    """Grok latest, improvement 1: after a pause, the payer's own
+    GET /jobs/<id> shows needs_review/dispute_deadline; the public
+    view omits them."""
+    job_id = _delivered_job(client)
+    r = client.post(f"/jobs/{job_id}/dispute",
+                    json={"payer": PAYER, "reason": "not what I asked for"},
+                    headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    # Authenticated as the payer: pause fields present.
+    r = client.get(f"/jobs/{job_id}", headers=PAYER_H)
+    assert r.status_code == 200, r.get_json()
+    job = r.get_json()["job"]
+    assert job["needs_review"] is True
+    assert job["dispute_deadline"] is not None
+    # Unauthenticated: public shape, pause fields omitted.
+    r = client.get(f"/jobs/{job_id}")
+    assert r.status_code == 200, r.get_json()
+    job = r.get_json()["job"]
+    assert "needs_review" not in job
+    assert "dispute_deadline" not in job

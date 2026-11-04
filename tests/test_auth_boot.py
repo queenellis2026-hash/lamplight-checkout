@@ -15,7 +15,7 @@ from app import auth
 
 def _clean_env(monkeypatch):
     for var in ("LAMPLIGHT_PAYER_TOKEN", "LAMPLIGHT_AGENT_TOKENS",
-                "LAMPLIGHT_DEMO_AUTH"):
+                "LAMPLIGHT_DEMO_TOKEN", "LAMPLIGHT_DEMO_AUTH"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -53,9 +53,26 @@ def test_real_tokens_pass_boot(monkeypatch):
     monkeypatch.setenv("LAMPLIGHT_PAYER_TOKEN", "prod-payer-secret-xyz")
     monkeypatch.setenv("LAMPLIGHT_AGENT_TOKENS", json.dumps(
         {"agent-1@example.com": "prod-agent-secret-abc"}))
+    # v8.14: the storefront gate token is also required at boot.
+    monkeypatch.setenv("LAMPLIGHT_DEMO_TOKEN", "prod-storefront-secret-123")
     auth.validate_auth_config()  # must not raise
     assert auth.payer_token() == "prod-payer-secret-xyz"
     assert auth.agent_tokens() == {"agent-1@example.com": "prod-agent-secret-abc"}
+    assert auth.storefront_token() == "prod-storefront-secret-123"
+
+
+def test_storefront_token_raises_without_config(monkeypatch):
+    """storefront_token() must not silently return the demo default."""
+    _clean_env(monkeypatch)
+    with pytest.raises(RuntimeError, match="LAMPLIGHT_DEMO_TOKEN"):
+        auth.storefront_token()
+
+
+def test_demo_optin_allows_storefront_default(monkeypatch):
+    """Explicit LAMPLIGHT_DEMO_AUTH=1 keeps the demo working."""
+    _clean_env(monkeypatch)
+    monkeypatch.setenv("LAMPLIGHT_DEMO_AUTH", "1")
+    assert auth.storefront_token() == auth.DEMO_STOREFRONT_TOKEN
 
 
 def test_demo_values_via_env_are_rejected(monkeypatch):

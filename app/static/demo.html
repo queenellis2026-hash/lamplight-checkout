@@ -39,16 +39,61 @@
   label { font-size: 0.85rem; color: var(--dim); }
   .failbox { border: 1px dashed var(--amber); border-radius: 8px; padding: 10px 12px;
              margin-top: 10px; font-size: 0.9rem; }
+  .beat-badge { display: inline-block; font-size: 0.75rem; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; border-radius: 6px;
+    padding: 3px 10px; margin-bottom: 8px; }
+  .beat-1 .beat-badge { background: #14532d; color: var(--green); }
+  .beat-2 .beat-badge { background: #3b2f0b; color: var(--amber); }
+  .beat-3 .beat-badge { background: #3b1d1d; color: var(--red); }
+  .beat-tagline { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px;
+    line-height: 1.5; }
+  .beat-1 { border-left: 4px solid var(--green); }
+  .beat-2 { border-left: 4px solid var(--amber); }
+  .beat-3 { border-left: 4px solid var(--red); }
 </style>
 </head>
 <body>
 <h1>Lamplight</h1>
-<p class="tagline">Trust shouldn't be the price of doing business. An agent hires another
-agent &mdash; the money stays held until the delivery matches. A partial job pays
-partial and gives the rest back.</p>
+<p class="tagline">An agent can hire another agent. The money stays held until the work
+matches. A partial job pays partial and gives the rest back.</p>
 
-<div class="card">
-  <h2>Beat 1 &mdash; full job: hold &rarr; deliver &rarr; capture</h2>
+<div class="card" style="border-color: var(--green);">
+  <h2>The story you're about to run</h2>
+  <p style="font-size:0.95rem;line-height:1.6;margin:0 0 10px">
+  <b>Agent Ellis</b> (the hirer) needs work done and has a budget.
+  <b>Agent auditor-01</b> (the worker) can do it &mdash; but neither trusts the other.
+  Ellis won't pay upfront and risk getting ghosted. The auditor won't work first and risk going unpaid.</p>
+  <p style="font-size:0.95rem;line-height:1.6;margin:0 0 10px">
+  So they use Lamplight: Ellis authorizes the payment through PayPal &mdash; the money is
+  <b>held, not sent</b>. The auditor delivers the work. Ellis reviews it against the brief
+  and approves. <i>Only then</i> does PayPal release the funds. Every step is recorded in
+  an auditable receipt.</p>
+  <p style="font-size:0.95rem;line-height:1.6;margin:0;color:var(--dim)">
+  Run the beats below. Beat 1 is the happy path. Beat 2 shows what happens when the work
+  is only half done &mdash; partial pay, rest returned. Beat 3 shows what happens when
+  the network lies mid-payment.</p>
+</div>
+
+<div class="card" style="border-color: var(--amber);">
+  <h2>Live proof &mdash; real PayPal sandbox, Nov 2</h2>
+  <p style="font-size:0.9rem;line-height:1.6;margin:0 0 8px;color:var(--dim)">
+  This page runs on a mock, but the money paths are proven against the real PayPal
+  sandbox. Order <span class="mono">6BU17716204337128</span> captured
+  <span class="mono">6F983221VG264664F</span> ($12.50, happy path). Flow C captured
+  $5.00 of an $8.00 hold (auth <span class="mono">9DS708743A503231N</span>,
+  PayPal-verified <span class="mono">PARTIALLY_CAPTURED</span>), $3.00 returned.</p>
+  <p style="font-size:0.9rem;line-height:1.6;margin:0;color:var(--dim)">
+  Voids are fully proven in the mock suite. Live voids are blocked by PayPal's
+  third-party-payee permission model &mdash; the worker's account receives the money,
+  not the API credential holder, and acting on another account's behalf requires
+  PayPal Partner approval + per-worker consent. A platform constraint, not a code gap.</p>
+</div>
+
+<div class="card beat-1">
+  <span class="beat-badge">Beat 1 &mdash; full job</span>
+  <p class="beat-tagline">The delivery matches the brief. The whole hold releases.</p>
+  <p style="font-size:0.9rem;color:var(--dim);margin:0 0 10px">Ellis hires the auditor for a
+  full job. The hold goes on, the delivery matches the brief, the full amount releases.</p>
   <div class="row">
     <input type="text" id="brief1" value="audit the top-20 holders, budget $50">
     <button id="go1" onclick="runBeat1()">Run beat 1</button>
@@ -56,8 +101,13 @@ partial and gives the rest back.</p>
   <div id="steps1"></div>
 </div>
 
-<div class="card">
-  <h2>Beat 2 &mdash; partial job: $8 hold &rarr; $5 paid &rarr; $3 back</h2>
+<div class="card beat-2">
+  <span class="beat-badge">Beat 2 &mdash; partial job</span>
+  <p class="beat-tagline">Eight dollars held. Five paid for the work that landed. Three returned.</p>
+  <p style="font-size:0.9rem;color:var(--dim);margin:0 0 10px">This time the delivery only
+  covers part of the brief. Ellis approves $5 of the $8 hold &mdash; the worker gets paid
+  for what it did, and the remaining $3 returns automatically. No dispute, no awkward
+  conversation. The receipt records the split.</p>
   <div class="row">
     <input type="text" id="brief2" value="write a summary of the audit, budget $50">
     <button id="go2" onclick="runBeat2()">Run beat 2</button>
@@ -65,8 +115,13 @@ partial and gives the rest back.</p>
   <div id="steps2"></div>
 </div>
 
-<div class="card">
-  <h2>Scripted failure &mdash; the response is lost, the money isn't</h2>
+<div class="card beat-3">
+  <span class="beat-badge">Beat 3 &mdash; lost response</span>
+  <p class="beat-tagline">PayPal takes the money. The reply never arrives. The ledger still settles once.</p>
+  <p style="font-size:0.9rem;color:var(--dim);margin:0 0 10px">The dangerous moment in any
+  payment system: PayPal takes the money, but the response never arrives. Did the capture
+  land? A naive system would retry and double-pay &mdash; or give up and lose track.
+  Watch Lamplight reconcile against PayPal and settle exactly once.</p>
   <p style="font-size:0.9rem;color:var(--dim)">Drops the capture response in the mock
   PayPal, then reconciles: the same idempotency key settles exactly once.</p>
   <div class="row"><button id="go3" onclick="runFailure()">Run the failure</button></div>
@@ -107,7 +162,11 @@ async function beat(box, brief, partialCents) {
   // 1. brief -> quote
   let dot = step(box, "Brief in &rarr; matching a worker off the rate card&hellip;", "wait");
   const created = await api("/jobs", {method:"POST",
-    headers:{"Content-Type":"application/json"},
+    headers:{"Content-Type":"application/json",
+             // v8.14 storefront gate: the demo page authenticates with the
+             // payer token (accepted by the gate alongside the storefront
+             // secret). See app/auth.py.
+             "Authorization":"Bearer "+PAYER_TOKEN},
     body: JSON.stringify({brief})});
   const jobId = created.job.job_id, quote = created.quote;
   // The quote names the matched worker's PayPal account — that is the
@@ -180,7 +239,8 @@ async function runFailure() {
   try {
     let dot = step(box, "Setting up a job, approved and authorized&hellip;", "wait");
     const created = await api("/jobs", {method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:{"Content-Type":"application/json",
+               "Authorization":"Bearer "+PAYER_TOKEN},
       body: JSON.stringify({brief: "audit the top-20 holders, budget $50"})});
     const jobId = created.job.job_id;
     const failAgent = created.quote.pay_to;

@@ -9,15 +9,15 @@
   "capture_status": null,
   "currency": "USD",
   "delivery_hash": "",
-  "job_id": "47cec4e1155c4d1eb8e262846e64e219",
+  "job_id": "253efa98ceab489d94607a312ffedc65",
   "last_paypal_response": {
     "body": {
       "amount": {
         "currency_code": "USD",
         "value": "8.00"
       },
-      "create_time": "2026-11-02T19:12:09Z",
-      "expiration_time": "2026-12-01T19:12:09Z",
+      "create_time": "2026-11-04T02:37:29Z",
+      "expiration_time": "2026-12-03T02:37:29Z",
       "id": "AUTH-0005",
       "status": "VOIDED"
     },
@@ -30,8 +30,8 @@
   "payer": "ellis@lamplight.example",
   "paypal_order_id": "ORDER-0004",
   "protocol": "lamplight-checkout/1",
-  "quote_id": "3919dd64-d46f-4ba7-8cf3-1614cae6b62c",
-  "receipt_hash": "0x23b44d90b60dd6958d9995caf731db92f39f290df0a059621a947501e5c459f6",
+  "quote_id": "fb933e65-72ee-4841-b47e-8295be3f9c60",
+  "receipt_hash": "0x6fe302d44c1f6324d5b6f9f0457022fdd5eb5a4d2b1a409de1eeb07a952d7927",
   "service": "research summary and write-up",
   "settlement_method": null,
   "type": "settlement-receipt",

@@ -132,6 +132,7 @@ import time
 import uuid
 
 from .paypal_client import (PayPalClient, PayPalError, amount_to_cents)
+from .errors import ErrorClass, classify_paypal_error
 from .quote import quote_expired
 from .audit import AuditLog
 
@@ -751,6 +752,18 @@ class Job:
         # forever. None when no capture is in flight (older store
         # files load with None via .get()).
         self.pending_capture_created_at: int | None = None
+        # Phase 5: capture recovery point. Persisted progress markers
+        # so a crashed capture request RESUMES instead of RESTARTS:
+        #   "intent_saved" — intent persisted, PSP not yet called.
+        #                    Safe to call PSP (or re-call with same key).
+        #   "psp_called"   — PSP was called; outcome unknown (returned
+        #                    ambiguously or raised). NEVER re-POST blindly —
+        #                    verify-then-act with the original key.
+        #   None           — no capture in flight (not started, recorded,
+        #                    abandoned, or reconciled).
+        # Set in the same save as the step it marks (same-transaction
+        # rule). Older store files load with None via .get().
+        self.capture_recovery_point: str | None = None
         # Grok fix order #2: a void intent is NOT a capture intent.
         # SaveVoidIntent / SaveResidualVoidIntent used to be stored in
         # pending_capture_request_id, so resolve_state() saw a "pending
@@ -814,6 +827,25 @@ class Job:
         # the flag is not set (store files written before round 20
         # load with None via .get()).
         self.needs_review_reason: str | None = None
+        # v8.13: dispute review window. dispute_opened_at stamps when
+        # the payer filed the dispute (epoch seconds);
+        # dispute_deadline is when the review expires — the sweeper
+        # auto-captures at/after it (silence pays the worker), so a
+        # dispute can never wedge a job forever. None when no dispute
+        # was filed (store files written before v8.13 load None via
+        # .get() — the sweeper treats those as legacy and skips them).
+        self.dispute_opened_at: int | None = None
+        self.dispute_deadline: int | None = None
+        # v8.14: worker's counter-note on a payment pause. Stored as
+        # chargeback evidence only — it never changes any outcome.
+        # The worker sets it via POST /jobs/<id>/pause/note; the payer
+        # never sees it in the public dict. None when unset (older
+        # store files load None via .get()).
+        # Internal field names keep the "dispute_*" prefix for
+        # continuity; the user-facing term is "payment pause" (see
+        # dispute_job docstring) — a timer that delays capture, not
+        # an adjudication. No one reviews the reason.
+        self.pause_worker_note: str | None = None
         # Set once authorize() attempts its PayPal POST (round 28,
         # C2) — see the field comment above.
         self.authorize_attempted: bool = False
@@ -886,6 +918,10 @@ class Job:
             "pending_capture_request_id": self.pending_capture_request_id,
             # Intent timestamp (round 28, C3).
             "pending_capture_created_at": self.pending_capture_created_at,
+            # Capture recovery point (Phase 5): intent_saved |
+            # psp_called | None. Internal operational detail — not
+            # on the public dict.
+            "capture_recovery_point": self.capture_recovery_point,
             # Void intent key (Grok fix order #2) — separate from the
             # capture intent so resolve_state() never mistakes a void
             # for a capture.
@@ -907,6 +943,11 @@ class Job:
             "needs_review_amount_cents": self.needs_review_amount_cents,
             # Wedge reason (round 20).
             "needs_review_reason": self.needs_review_reason,
+            # Dispute review window (v8.13).
+            "dispute_opened_at": self.dispute_opened_at,
+            "dispute_deadline": self.dispute_deadline,
+            # Worker counter-note on a payment pause (v8.14).
+            "pause_worker_note": self.pause_worker_note,
             # The capture denial, if PayPal reported one (round 10).
             "webhook_denial": self.webhook_denial,
             # Round 10, second layer: the stored record is already
@@ -969,6 +1010,10 @@ class Job:
             "pending_capture_request_id": self.pending_capture_request_id,
             # Intent timestamp (round 28, C3).
             "pending_capture_created_at": self.pending_capture_created_at,
+            # Capture recovery point (Phase 5): intent_saved |
+            # psp_called | None. Must persist — a crashed process
+            # resumes from this on the next attempt.
+            "capture_recovery_point": self.capture_recovery_point,
             # Void intent key (Grok fix order #2).
             "pending_void_request_id": self.pending_void_request_id,
             # Authorize-attempted flag (round 28, C2).
@@ -988,6 +1033,11 @@ class Job:
             "needs_review_amount_cents": self.needs_review_amount_cents,
             # Wedge reason (round 20).
             "needs_review_reason": self.needs_review_reason,
+            # Dispute review window (v8.13).
+            "dispute_opened_at": self.dispute_opened_at,
+            "dispute_deadline": self.dispute_deadline,
+            # Worker counter-note on a payment pause (v8.14).
+            "pause_worker_note": self.pause_worker_note,
             "last_paypal_response": self.last_paypal_response,
             "webhook_denial": self.webhook_denial,
         }
@@ -1045,6 +1095,11 @@ class Job:
         # timestamp — they still load, with no timestamp.
         job.pending_capture_created_at = data.get(
             "pending_capture_created_at")
+        # .get(): store files written before Phase 5 have no recovery
+        # point — they still load, with no point recorded. A job with
+        # a pending intent but no point is treated as "intent_saved"
+        # (the PSP was never called under the new scheme).
+        job.capture_recovery_point = data.get("capture_recovery_point")
         # .get(): store files written before Grok fix order #2 have no
         # void intent — they still load, with no void in flight.
         job.pending_void_request_id = data.get("pending_void_request_id")
@@ -1077,6 +1132,14 @@ class Job:
         # .get(): store files written before round 20 have no wedge
         # reason — they still load, with no reason recorded.
         job.needs_review_reason = data.get("needs_review_reason")
+        # .get(): store files written before v8.13 have no dispute
+        # window — they still load; v8.14 treats a flagged job with
+        # no dispute_deadline as already expired (captured, not
+        # skipped forever).
+        job.dispute_opened_at = data.get("dispute_opened_at")
+        job.dispute_deadline = data.get("dispute_deadline")
+        # v8.14: worker counter-note on a payment pause.
+        job.pause_worker_note = data.get("pause_worker_note")
         # .get(): store files written before round 4 have no
         # last_paypal_response — they still load, with no audit record.
         job.last_paypal_response = data.get("last_paypal_response")
@@ -1111,6 +1174,37 @@ class EscrowService:
     # delivery time can outlast PayPal's ~3-day authorization honor
     # period, and auto-capture against an expired hold always fails.
     MAX_INSPECTION_WINDOW_SECONDS = 48 * 3600
+
+    # v8.13: dispute review window — how long a payer-filed dispute
+    # pauses auto-capture before the sweeper captures anyway (silence
+    # pays the worker). 72h, clamped to the PayPal authorization
+    # honor period (same ~72h-from-authorization convention as the
+    # inspection deadline, with the same 1h margin).
+    DISPUTE_WINDOW_SECONDS = 72 * 3600
+
+    # v8.13: minimum authorization time remaining (after the 1h
+    # honor margin) for a dispute to be accepted. A dispute filed
+    # with less than this left cannot cover a meaningful review
+    # window before the hold expires — those jobs must settle or
+    # void now, not enter review (409).
+    DISPUTE_MIN_HONOR_REMAINING_SECONDS = 6 * 3600
+
+    # v8.13: PayPal authorization honor period and the safety margin
+    # applied to it (shared by the inspection-deadline clamp and the
+    # dispute-deadline clamp). Honor is three days from authorization,
+    # not the 29-day auth lifetime.
+    HONOR_PERIOD_SECONDS = 3 * 24 * 60 * 60
+    HONOR_MARGIN_SECONDS = 60 * 60
+
+    def _honor_limit(self, job: Job) -> int | None:
+        """v8.14: the latest wall-clock time a pause deadline may use —
+        authorized_at + honor period − margin. None when authorized_at
+        is unknown (fail closed: the caller refuses the pause)."""
+        authorized_at = job.authorized_at
+        if authorized_at is None:
+            return None
+        return (authorized_at + self.HONOR_PERIOD_SECONDS
+                - self.HONOR_MARGIN_SECONDS)
 
     # MEDIUM #6 / Gemini Q3: default cap on consecutive void-read
     # strikes before the job wedges for operator review. Transient
@@ -1348,15 +1442,21 @@ class EscrowService:
         job.pending_capture_amount_cents = amount_cents
         job.pending_capture_request_id = request_id
         job.pending_capture_created_at = int(time.time())
+        # Phase 5: recovery point — the intent is saved, the PSP has
+        # not been called yet. Persisted in the same save (same-
+        # transaction rule).
+        job.capture_recovery_point = "intent_saved"
         self._save(job)
 
     def _clear_pending_capture(self, job: Job) -> None:
         """Clear a capture intent without saving: the caller saves
         (it always saves right after recording the capture, or when
-        reconcile proves nothing moved)."""
+        reconcile proves nothing moved). Phase 5: also clears the
+        recovery point — no intent in flight means no point."""
         job.pending_capture_amount_cents = None
         job.pending_capture_request_id = None
         job.pending_capture_created_at = None
+        job.capture_recovery_point = None
 
     def _set_pending_void(self, job: Job, request_id: str) -> None:
         """Record a void intent (Grok fix order #2) and save it BEFORE
@@ -2390,7 +2490,7 @@ class EscrowService:
             raise EscrowError("delivery verification failed")
         return self._capture_core(job)
 
-    def _capture_core(self, job: Job) -> dict:
+    def _capture_core(self, job: Job, _sweep_dispute: bool = False) -> dict:
         """The money-moving core of a full capture, shared by the
         payer-initiated capture() and the inspection-deadline
         auto-capture sweep (suggestion #6).
@@ -2408,12 +2508,22 @@ class EscrowService:
         @_per_job_locked; check_inspection_deadlines() takes
         self._delivery_lock(job.job_id) per job. The job must already
         be re-read inside the lock (fresh from the store).
+
+        _sweep_dispute (v8.14): the sweep's expired-pause capture.
+        The needs_review flag stays SET until PayPal accepts — it is
+        the 409 that blocks a concurrent pause from landing in the
+        gap — so the normal guard is bypassed here. The flag is
+        cleared in the success save, same write as the terminal
+        status. On PayPal failure the flag stays set and the deadline
+        stays in the past, so the next sweep retries.
         """
         # Round 26 (Gemini round-25 suggestion): the needs_review flag
         # guards capture too, matching void_after_deadline — a wedged
         # job must not accept new capture attempts. The payer-only
-        # force-settle is the exit.
-        if job.needs_review:
+        # force-settle is the exit. v8.14: the sweep's expired-pause
+        # capture bypasses this — the flag is the ladder-blocker and
+        # clears on success below.
+        if job.needs_review and not _sweep_dispute:
             amount_note = (
                 f" (attempted ${job.needs_review_amount_cents/100:.2f})"
                 if job.needs_review_amount_cents is not None else "")
@@ -2550,14 +2660,41 @@ class EscrowService:
             # Round 50 (Claude round-49 Medium 2): the pre-read is now
             # the shared _retry_pre_read helper.
             request_id = job.pending_capture_request_id
+            # Phase 5: if the recovery point says the PSP was already
+            # called, this is a resume after a crash in the ambiguous
+            # window. The _retry_pre_read below already reads before
+            # replaying (verify-then-act semantics) — the explicit
+            # point makes the resume path auditable and prevents
+            # future refactors from weakening it into a blind re-POST.
+            if job.capture_recovery_point == "psp_called":
+                self._audit("capture", job, idempotency_key=request_id,
+                            outcome="resumed",
+                            reason="resuming after psp_called recovery "
+                                   "point; verify-then-act with the "
+                                   "original key, never a blind re-POST")
             settled = self._retry_pre_read(job, "capture")
             if settled is not None:
                 return settled
         try:
             result = self.paypal.capture_authorization(
                 job.authorization_id, request_id=request_id)
-        except PayPalError:
-            result = self._capture_with_reconcile(job)
+            # Phase 5: the PSP was called and returned. Mark psp_called
+            # BEFORE processing the result — a crash between here and
+            # recording must resume via verify-then-act, not re-POST.
+            # Same-transaction rule: the point persists in the same
+            # save as the step it marks (the callers save after).
+            job.capture_recovery_point = "psp_called"
+            self._save(job)
+        except PayPalError as e:
+            # Phase 5: the PSP call raised. We are past the RPC attempt,
+            # so request_was_sent=True — a transport failure here is
+            # AMBIGUOUS (the request may have executed), not RETRYABLE.
+            # Mark psp_called so a crash in the handler resumes via
+            # verify-then-act, then route through the canonical helper.
+            job.capture_recovery_point = "psp_called"
+            self._save(job)
+            error_class = classify_paypal_error(e, request_was_sent=True)
+            result = self._verify_then_act(job, e, error_class)
         # Round 40 (ChatGPT round-39): the COMPLETED gate is for
         # observed (direct POST) results only. A reconciled result
         # carries the capture's REAL status from the read — the money
@@ -2652,21 +2789,61 @@ class EscrowService:
                                      id_=result.get("id"), body=result)
         job.status = "CAPTURED"
         job.settled_at = int(time.time())
+        if _sweep_dispute:
+            # v8.14: clear the pause flag in the SAME write as the
+            # terminal status. The flag stayed set until PayPal
+            # accepted, blocking the ladder; now the job is settled.
+            self._clear_review_flag(job)
         self._save(job)
         return result
+
+    def _resolve_expired_dispute(self, job: Job,
+                                 now: int | None = None) -> None:
+        """Deadline reached. Record that capture is owed. Do not clear
+        needs_review here — dispute_job 409s while the flag is set, and a
+        failed capture must retry instead of falling back to a fresh DELIVERED."""
+        effective_now = now if now is not None else int(time.time())
+        self._audit("dispute_deadline_reached", job, outcome="completed",
+                    reason=(
+                        f"dispute deadline {job.dispute_deadline} reached "
+                        f"at {effective_now} — capture owed"))
+        # no _clear_review_flag, no status change. The flag stays set
+        # until the capture succeeds (cleared in _capture_core's success
+        # save, same write as the terminal status).
+
+    def _dispute_sweep_action(self, job: Job, effective_now: int) -> str:
+        if not job.needs_review:
+            return "skip"
+        # No deadline is the v8.12 wedge (and any other writer that sets
+        # the flag and forgets the timestamp). Capture it. Do not skip forever.
+        if job.dispute_deadline is None or job.dispute_deadline <= effective_now:
+            return "capture"
+        return "skip"
 
     def check_inspection_deadlines(self, now: int | None = None) -> list[str]:
         """Auto-capture jobs whose inspection window expired (suggestion
         #6, T_DEADLINE in S6).
 
         For each job in S6 (DELIVERED) whose inspection_deadline has
-        passed and which has no active dispute (needs_review is False),
+        passed and which has no active pause (needs_review is False),
         run the full capture through _capture_core — the same
         pre-flight read, reconcile, intent, and COMPLETED gate the
         payer-initiated capture uses. The delivery-text verification is
-        waived: an expired window with no dispute is deemed acceptance
-        (the buyer had the whole window to dispute and did not), so
+        waived: an expired window with no pause is deemed acceptance
+        (the buyer had the whole window to pause and did not), so
         there is no delivery text for the system to verify.
+
+        v8.14: a payer-filed payment pause (see dispute_job) holds
+        auto-capture only until dispute_deadline. At/after the deadline
+        the sweep records the timeout (audit) and captures through
+        _capture_core with _sweep_dispute=True. The needs_review flag
+        stays SET until PayPal accepts — it is the 409 that blocks a
+        concurrent pause from landing in the clear-then-capture gap —
+        and clears in the same write as the terminal CAPTURED status.
+        On PayPal failure the flag stays set and the deadline stays in
+        the past, so the next sweep retries. A pause can never wedge a
+        job forever, and the job never passes through DELIVERED with
+        the flag cleared.
 
         On the dispatcher (step 4 of the design): app/dispatcher.py
         already has an S6 + T_DEADLINE cell (_s6_deadline), but it is a
@@ -2676,11 +2853,18 @@ class EscrowService:
         honestly supply, so the sweep captures through the live
         _capture_core instead of fabricating dispatcher evidence.
 
+        Sweep-frequency requirement (v8.14): the default sweep runs
+        every 300s; the honor margin is 3600s. The interval plus one
+        retry must fit inside the margin, or a deadline that passes
+        just after a tick waits out the margin and the capture goes
+        out past the honor period. Do not configure
+        LAMPLIGHT_SWEEP_INTERVAL_SECONDS above ~1800.
+
         A job that fails to capture (PayPal error, wedge raised
         mid-flight) is logged and skipped — the sweep never dies on
-        one bad job; the next run retries it. Jobs with needs_review
-        set are skipped (a dispute blocks auto-capture). Returns the
-        job ids that reached CAPTURED on this run.
+        one bad job; the next run retries it. Jobs under an unexpired
+        pause are skipped. Returns the job ids that reached CAPTURED
+        on this run.
 
         ``now`` is a test-only hook; production calls always use
         wall-clock time.
@@ -2690,17 +2874,23 @@ class EscrowService:
         for job in self.store.all():
             if job.status != "DELIVERED":
                 continue
-            if job.inspection_deadline is None:
-                continue
-            if job.inspection_deadline >= effective_now:
-                continue
             if job.needs_review:
-                # Dispute blocks auto-capture — the operator path
-                # (force_settle) is the exit.
-                continue
+                # v8.14: pause clock, not the inspection clock. Skip
+                # while under review; fall through to the locked
+                # capture path once the pause deadline has passed.
+                # The flag stays set through the capture — it is the
+                # ladder-blocker.
+                if (self._dispute_sweep_action(job, effective_now)
+                        != "capture"):
+                    continue
+            else:
+                if job.inspection_deadline is None:
+                    continue
+                if job.inspection_deadline >= effective_now:
+                    continue
             with self._delivery_lock(job.job_id):
                 # Re-read inside the lock: the sweep's snapshot may be
-                # stale, and a concurrent capture/void/dispute may
+                # stale, and a concurrent capture/void/pause may
                 # have moved the job since.
                 fresh = self.store.get(job.job_id)
                 if fresh is None:
@@ -2708,9 +2898,35 @@ class EscrowService:
                 job = fresh
                 if job.status != "DELIVERED":
                     continue
+                sweep_dispute = False
                 if job.needs_review:
-                    continue
-                if (job.inspection_deadline is None
+                    if (self._dispute_sweep_action(job, effective_now)
+                            != "capture"):
+                        continue
+                    # v8.14: pause expired unresolved — record the
+                    # timeout (audit only; the flag stays SET). A
+                    # concurrent pause 409s on the flag. Capture
+                    # below with _sweep_dispute=True; the flag clears
+                    # in the same write as CAPTURED on success, and
+                    # stays set for retry on failure.
+                    try:
+                        self._resolve_expired_dispute(job,
+                                                      now=effective_now)
+                    except Exception as e:  # noqa: BLE001 — e.g. a
+                        # SQLite optimistic-concurrency conflict: another
+                        # process won the race (filed or resolved first).
+                        # Skip this run; the next sweep sees fresh state.
+                        # The sweep never dies on one bad job.
+                        logger.warning(
+                            "inspection auto-capture for job %s: pause "
+                            "resolution failed: %s", job.job_id, e)
+                        continue
+                    job = self.store.get(job.job_id)
+                    if (job is None or job.status != "DELIVERED"
+                            or not job.needs_review):
+                        continue
+                    sweep_dispute = True
+                elif (job.inspection_deadline is None
                         or job.inspection_deadline >= effective_now):
                     continue
                 # MEDIUM #7: verify the authorization is still valid
@@ -2740,11 +2956,13 @@ class EscrowService:
                         "authorization %s", job.job_id, auth.get("status"))
                     continue
                 try:
-                    self._capture_core(job)
+                    self._capture_core(job, _sweep_dispute=sweep_dispute)
                 except Exception as e:  # noqa: BLE001 — MEDIUM #5: one
                     # bad job (PayPalError, GuardRejection, wedge
                     # raised mid-flight) must not kill the whole sweep;
-                    # the next run retries it.
+                    # the next run retries it. For a sweep dispute the
+                    # flag stays set and the deadline stays in the past,
+                    # so the next sweep returns "capture" again.
                     logger.warning(
                         "inspection auto-capture for job %s refused: %s",
                         job.job_id, e)
@@ -4125,6 +4343,41 @@ class EscrowService:
                                      status=auth.get("status"),
                                      id_=auth.get("id"), body=auth)
         self._save(job)
+
+    def _verify_then_act(self, job: Job, error: PayPalError,
+                         error_class: ErrorClass) -> dict:
+        """Phase 5: canonical ambiguous-outcome handler for the capture path.
+
+        Contract: the PSP call raised `error` (classified as
+        `error_class`) after the request was attempted. The caller must
+        NOT re-POST blindly. This helper implements verify-then-act:
+
+        1. Replay the stored idempotency key (PayPal replays the
+           original response if it executed; executes now if it did not).
+        2. If the replay also fails, read the authorization's actual
+           state and reconcile from it.
+        3. Never invent a result — a capture is recorded only from an
+           observed POST response or a PayPal read that proves it.
+
+        For DEFINITIVE errors the replay is still safe (PayPal replays
+        the declined/error body for the same key); the reconcile then
+        records the finality. For RETRYABLE errors the replay is the
+        retry. For AMBIGUOUS errors the replay-then-read is the verify.
+
+        Currently delegates to the battle-tested `_capture_with_reconcile`
+        (rounds 11-53 of hardening). The taxonomy classification is
+        audit-relevant and future branches (e.g. giving up after N
+        ambiguous retries) will key off `error_class` here — the single
+        choke point, not scattered call sites.
+        """
+        self._audit("capture", job,
+                    idempotency_key=job.pending_capture_request_id,
+                    outcome="verify_then_act",
+                    reason=f"ambiguous PSP outcome ({type(error).__name__}, "
+                           f"status {error.status}) classified "
+                           f"{error_class.value}; verifying with original "
+                           f"key before acting")
+        return self._capture_with_reconcile(job)
 
     def _capture_with_reconcile(self, job: Job) -> dict:
         """The capture call failed — but it may have executed server-side
@@ -6752,6 +7005,140 @@ class EscrowService:
                 "divergent_count": sum(1 for e in entries if e["divergent"]),
                 "entries": entries}
 
+    # Phase 4 (property-testing game plan): scheduled reconciliation.
+    # ledger_reconciliation_report() compares the books against fresh
+    # PayPal reads but is read-only and unscheduled. This method is the
+    # nightly runner's core: it persists the run + findings, and alerts
+    # only on NEW divergences — deduped against open findings with the
+    # same (job_id, issue_type), so a repeat offender does not page
+    # twice. A failed PayPal read is recorded as a finding but is NOT
+    # a divergence: absence of evidence is not evidence of divergence.
+    #
+    # Returns a summary dict; the run record itself lives in the store.
+
+    RECON_ALERT_SEVERITY = {
+        "book_capture_not_listed_by_paypal": "high",
+        "amount_mismatch": "high",
+        "paypal_capture_not_on_books": "high",
+        "status_mismatch": "high",
+        "paypal_partially_captured_but_books_show_no_capture": "medium",
+        "paypal_read_failed": "medium",
+    }
+
+    def run_scheduled_reconciliation(self, *, alert_log_path=None,
+                                     alert_url=None) -> dict:
+        import os
+        import uuid
+        now = int(self._now())
+        run_id = uuid.uuid4().hex
+        if alert_log_path is None:
+            alert_log_path = os.environ.get(
+                "RECONCILE_ALERT_LOG", "reconciliation_alerts.jsonl")
+        if alert_url is None:
+            alert_url = os.environ.get("RECONCILE_ALERT_URL")
+
+        report = self.ledger_reconciliation_report()
+        entries = report.get("entries", [])
+        new_findings = []
+        alerts = []
+        read_failures = 0
+        divergent_entries = 0
+        for entry in entries:
+            job_id = entry["job_id"]
+            issues = entry.get("issues", [])
+            entry_divergent = False
+            for issue in issues:
+                issue_type = issue.split(":", 1)[0].strip()
+                is_read_failure = (issue_type == "paypal_read_failed")
+                if is_read_failure:
+                    read_failures += 1
+                else:
+                    entry_divergent = True
+                # Alert dedupe: an open finding for the same
+                # (job_id, issue_type) means this is already known.
+                if self.store.find_open_finding(job_id, issue_type):
+                    continue
+                finding = {
+                    "finding_id": uuid.uuid4().hex,
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "issue_type": issue_type,
+                    "detail": issue,
+                    "first_seen": now,
+                    "status": "open",
+                    "resolved_at": None,
+                    "note": None,
+                }
+                self.store.record_reconciliation_finding(finding)
+                new_findings.append(finding)
+                alerts.append({
+                    "ts": now,
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "issue_type": issue_type,
+                    "detail": issue,
+                    "severity": self.RECON_ALERT_SEVERITY.get(
+                        issue_type, "low"),
+                })
+            if entry_divergent:
+                divergent_entries += 1
+
+        if divergent_entries > 0:
+            status = "divergent"
+        elif read_failures > 0:
+            status = "error"
+        else:
+            status = "ok"
+        finished_at = int(self._now())
+        self.store.record_reconciliation_run({
+            "run_id": run_id,
+            "started_at": now,
+            "finished_at": finished_at,
+            "jobs_checked": report.get("jobs_checked", 0),
+            "divergent_count": divergent_entries,
+            "status": status,
+        })
+
+        alerts_sent = 0
+        if alerts:
+            alerts_sent = self._emit_recon_alerts(
+                alerts, alert_log_path=alert_log_path, alert_url=alert_url)
+        return {"run_id": run_id, "status": status,
+                "jobs_checked": report.get("jobs_checked", 0),
+                "divergent_count": divergent_entries,
+                "read_failures": read_failures,
+                "new_findings": len(new_findings),
+                "alerts_sent": alerts_sent,
+                "alert_log": str(alert_log_path)}
+
+    def _emit_recon_alerts(self, alerts, *, alert_log_path,
+                           alert_url) -> int:
+        """Append alerts to the JSONL alert log and, best-effort, POST
+        them to the configured webhook URL. Returns the number of
+        alerts written to the log. Never raises — alerting must not
+        break the reconciliation run."""
+        import json
+        import urllib.request
+        sent = 0
+        try:
+            with open(alert_log_path, "a") as f:
+                for alert in alerts:
+                    f.write(json.dumps(alert) + "\n")
+                    sent += 1
+        except OSError:
+            return 0
+        if alert_url:
+            try:
+                body = json.dumps(
+                    {"alerts": alerts}).encode("utf-8")
+                req = urllib.request.Request(
+                    alert_url, data=body,
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception:
+                pass
+        return sent
+
     def _job_for_authorization(self, authorization_id: str) -> Job | None:
         """The job whose hold is this authorization id, or None. Jobs
         are keyed by job id, so this scans — the same scan
@@ -8008,6 +8395,142 @@ class EscrowService:
         job.status = "VOIDED"
         return ("VOIDED", post_auth)
 
+    @_audited("dispute")
+    @_per_job_locked
+    def dispute_job(self, job: Job, *, payer: str, reason: str,
+                    now: int | None = None) -> dict:
+        """v8.14: payer-filed PAYMENT PAUSE — honest naming for what
+        this is.
+
+        This is NOT an adjudicated dispute. There is no arbiter, no
+        evidence review, and no path to not-pay through this endpoint.
+        It pauses the 48h auto-capture for up to 72h (clamped to the
+        PayPal authorization honor period); at the deadline the
+        sweeper captures anyway — silence pays the worker. The reason
+        string is stored verbatim for the operator's records; no one
+        will read it as part of a review, because there is no review.
+        The worker may attach a counter-note (see set_pause_worker_note)
+        as chargeback evidence; it does not change the outcome.
+
+        Until v8.12, the inspection window auto-captured with no pause
+        path. v8.12 added the pause with no timer ("dispute then
+        disappear" was the dominant strategy). v8.13 gave it a
+        deadline. v8.14 keeps the needs_review flag SET until PayPal
+        accepts — the flag is the 409 that blocks a concurrent pause
+        from landing in the clear-then-capture gap — and clears it in
+        the same write as the terminal CAPTURED status.
+
+        Deadline = min(now + DISPUTE_WINDOW_SECONDS (72h),
+        authorized_at + HONOR_PERIOD_SECONDS - HONOR_MARGIN_SECONDS).
+        The honor clamp keeps the timeout capture inside PayPal's
+        ~3-day authorization honor period, so the money is still
+        capturable when the clock runs out.
+
+        A pause is refused (409) when authorized_at is unknown (v8.14:
+        fail closed — a window without a known honor period is a trap,
+        not protection) or when the remaining honor period cannot
+        cover DISPUTE_MIN_HONOR_REMAINING_SECONDS (6h): those jobs
+        must settle or void now, not enter a review window the hold
+        cannot survive.
+
+        Rules:
+        - Only the job's payer can pause (403 otherwise).
+        - Only a DELIVERED job can be paused (409 otherwise) — there
+          is nothing to pause before delivery, and nothing to pause
+          after settlement.
+        - A job already carrying needs_review cannot be paused again
+          (409).
+        - The reason is required (400 on empty) and stored verbatim.
+
+        ``now`` is a test-only hook; production uses wall-clock time.
+
+        Returns {"job_id", "status", "needs_review", "reason",
+        "dispute_opened_at", "dispute_deadline", "effect",
+        "resolves_by"}. effect="payment_pause" and resolves_by="capture"
+        say what this is: a timer that delays capture, not an
+        adjudication.
+        """
+        effective_now = now if now is not None else int(time.time())
+        # Re-read inside the lock: the caller's snapshot may be stale.
+        fresh = self.store.get(job.job_id)
+        if fresh is None:
+            raise EscrowError(f"job not found: {job.job_id}")
+        job = fresh
+        if job.payer != payer:
+            raise EscrowError("only the payer can pause this job")
+        if job.status != "DELIVERED":
+            raise EscrowError(
+                f"only a DELIVERED job can be paused (status: {job.status})")
+        if job.needs_review:
+            raise EscrowError("job is already under review")
+        if not reason or not reason.strip():
+            raise EscrowError("pause reason is required")
+        # v8.14: honor math via _honor_limit. A missing authorized_at
+        # must not become a flat 72h — fail closed.
+        honor_limit = self._honor_limit(job)
+        if honor_limit is None:
+            raise EscrowError(
+                "cannot open a dispute: authorization honor period is "
+                "unknown — settle or void now instead")
+        if (honor_limit - effective_now
+                < self.DISPUTE_MIN_HONOR_REMAINING_SECONDS):
+            raise EscrowError(
+                "cannot open a dispute: insufficient authorization "
+                "time remains for a review window — settle or void "
+                "now instead")
+        deadline = min(effective_now + self.DISPUTE_WINDOW_SECONDS,
+                       honor_limit)
+        # Cap the reason length — it is stored on the job and surfaced
+        # in admin listings; unbounded input has no business there.
+        reason = reason.strip()[:500]
+        # v8.14: authorized_at and both dispute timestamps commit in
+        # the same save — a crash between "flag set" and "deadline set"
+        # would leave the skip-forever row, which now captures instead
+        # of wedging, but one write is still the correct atomicity.
+        job.dispute_opened_at = effective_now
+        job.dispute_deadline = deadline
+        self._set_review_flag(job, f"payer pause: {reason}")
+        self.store.save(job)
+        return {"job_id": job.job_id, "status": job.status,
+                "needs_review": True, "reason": reason,
+                "dispute_opened_at": job.dispute_opened_at,
+                "dispute_deadline": job.dispute_deadline,
+                "effect": "payment_pause",
+                "resolves_by": "capture"}
+
+    @_audited("pause_worker_note")
+    @_per_job_locked
+    def set_pause_worker_note(self, job: Job, *, agent: str,
+                              note: str) -> dict:
+        """v8.14: the worker's counter-note on a payment pause.
+
+        Stored as chargeback evidence only — it never changes any
+        outcome. The pause still expires on its deadline and the
+        sweeper still captures; this note is just the worker's side
+        of the story, on the record, in case the payer later files a
+        real dispute with PayPal.
+
+        Rules: only the job's agent can set it; the job must be
+        paused (needs_review set); the note is capped at
+        2000 chars; setting it twice overwrites.
+        """
+        fresh = self.store.get(job.job_id)
+        if fresh is None:
+            raise EscrowError(f"job not found: {job.job_id}")
+        job = fresh
+        if agent != job.agent:
+            raise EscrowError("only the job's worker can set this note")
+        if not job.needs_review:
+            raise EscrowError(
+                "no active pause to respond to "
+                f"(status: {job.status})")
+        if not note or not note.strip():
+            raise EscrowError("note is required")
+        job.pause_worker_note = note.strip()[:2000]
+        self._save(job)
+        return {"job_id": job.job_id, "status": job.status,
+                "note_set": True}
+
     @_audited("force_settle")
     @_per_job_locked
     def force_settle(self, job: Job, *, payer: str) -> dict:
@@ -8018,6 +8541,7 @@ class EscrowService:
         return self._force_settle_legacy(job, payer=payer)
 
     @_audited("clear_terminal_review_flag")
+    @_per_job_locked
     def clear_terminal_review_flag(self, job: Job, *, payer: str) -> dict:
         """Payer-only review-clear for TERMINAL flagged jobs (v8.2,
         Finding 2).
@@ -8077,12 +8601,18 @@ class EscrowService:
             status=auth.get("status"), id_=auth.get("id"), body=auth)
         self._clear_review_flag(job)
         self._save(job)
-        # Verify no money state changed.
+        # Verify no money state changed. v8.14: this was an assert —
+        # python -O strips asserts, so a real EscrowError now guards
+        # it. If money moved during a review-clear, the books are
+        # corrupt and the operator must intervene, not silently
+        # continue.
         money_after = (job.status, job.capture_id,
                        job.capture_amount_cents, job.voided_amount_cents)
-        assert money_before == money_after, (
-            f"money state changed during review-clear: "
-            f"{money_before} -> {money_after}")
+        if money_before != money_after:
+            raise EscrowError(
+                f"money state changed during review-clear: "
+                f"{money_before} -> {money_after} "
+                f"(operator review needed)")
         decision = (
             f"payer cleared terminal review flag: PayPal reports "
             f"authorization {auth.get('status')}, "
@@ -8093,6 +8623,71 @@ class EscrowService:
                 "paypal_status": auth.get("status"),
                 "listed_captures": listed,
                 "decision": decision}
+
+    @staticmethod
+    def _is_active_pause(job: Job, now: int) -> bool:
+        """v8.14: True when the job carries an ACTIVE payer pause —
+        a payment pause whose deadline has not yet passed.
+
+        A pause sets needs_review + dispute_opened_at +
+        dispute_deadline. A reconcile wedge sets needs_review with no
+        deadline (or an expired one). Only the active pause gets the
+        capture-on-force_settle semantics; wedges keep the
+        read-then-decide logic below.
+        """
+        return (job.needs_review
+                and job.dispute_deadline is not None
+                and job.dispute_deadline > now)
+
+    def _force_settle_active_pause(self, job: Job, *,
+                                   payer: str) -> dict:
+        """v8.14: force_settle on an active payer pause.
+
+        The payer paused auto-capture ("wait") and now explicitly
+        settles ("pay the worker now"). This performs a real PayPal
+        capture via _capture_core — the full safety path (pre-flight
+        read, intent recording, COMPLETED gate) — not a void. The
+        review flag clears in the same write as the terminal CAPTURED
+        status.
+
+        No delivery-text verification: the job is already DELIVERED
+        (delivery was verified at delivery time), and force_settle is
+        the payer's explicit override of their own pause.
+        """
+        # v8.14 fix (Grok review, Nov 2026): do NOT clear the pause
+        # flag or timestamps before PayPal accepts. _capture_core is
+        # called with _sweep_dispute=True — the flag bypasses the
+        # needs_review guard, stays SET through the PayPal call, and
+        # clears in the same write as the terminal CAPTURED status on
+        # success. On PayPal failure the flag and the deadline stay
+        # set, so the pause stands and the payer (or the sweep at the
+        # deadline) can retry. Clearing first repeated the
+        # clear-then-capture bug: _set_pending_capture saves inside
+        # _capture_core, so a failed capture left the pause gone
+        # while money was still in flight.
+        result = self._capture_core(job, _sweep_dispute=True)
+        # _capture_core settled CAPTURED with settlement_method="observed"
+        # — the capture is clean (full amount, PayPal-confirmed), not
+        # unaudited. Do NOT override to "force_settled": the dispatcher
+        # maps that to S10c (unaudited), which is wrong here. The
+        # force-settle decision is on the audit trail (below) and in
+        # the settlement note.
+        job.settlement_note = (
+            "payer force-settled an active payment pause — "
+            "captured now instead of waiting for the pause deadline")
+        self._audit("force_settle_pause_captured", job,
+                    outcome="completed",
+                    reason="payer settled an active pause early")
+        self._save(job)
+        # Return the force-settle contract shape, not the raw capture
+        # result: callers (and the FSM tracker) expect
+        # {job_id, from_status, to_status, ...}.
+        return {"job_id": job.job_id,
+                "from_status": "DELIVERED",
+                "to_status": "CAPTURED",
+                "updated": True,
+                "capture_id": job.capture_id,
+                "error": ""}
 
     def _force_settle_legacy(self, job: Job, *, payer: str) -> dict:
         """Payer-only exit from a needs_review wedge (round 20). The
@@ -8118,6 +8713,19 @@ class EscrowService:
         if job.status not in ("AUTHORIZED", "DELIVERED"):
             raise EscrowError(
                 f"cannot force-settle in state {job.status}")
+        # v8.14 fix (Phase 1 property-test finding, Nov 2026): an
+        # ACTIVE payer pause (dispute_deadline in the future) is not a
+        # wedge — it is the payer saying "wait, don't auto-capture".
+        # force_settle is the payer saying "settle it now", which
+        # means CAPTURE (pay the worker), not void. The dispute
+        # response text is explicit about the cases: an active pause
+        # captures now; otherwise an open hold is voided (money back
+        # to the payer); a landed capture stays with the worker.
+        # The wedge logic below would void a CREATED hold ("nothing
+        # moved"), treating a pause like a dispute — but a pause is
+        # "wait", not "don't pay". Route to the capture path.
+        if self._is_active_pause(job, int(time.time())):
+            return self._force_settle_active_pause(job, payer=payer)
         # Round 28 (C1): the pending-intent check moved AFTER the
         # authorization read below. A capture still in flight must be
         # resolved first — EXCEPT on a released hold (VOIDED/EXPIRED/

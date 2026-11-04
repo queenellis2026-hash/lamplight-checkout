@@ -9,7 +9,7 @@
   "capture_status": null,
   "currency": "USD",
   "delivery_hash": "ae337bcb5567803257910573c4332c06073adf6fbdc3168f906a3f5281a2107f",
-  "job_id": "e5d5dfe133254ed18ad673f362dcedd4",
+  "job_id": "86dfac361f974482a5618994ccff7a7b",
   "last_paypal_response": {
     "body": {
       "amount": {
@@ -17,7 +17,7 @@
         "value": "12.50"
       },
       "authorization_id": "AUTH-0002",
-      "create_time": "2026-11-02T19:12:09Z",
+      "create_time": "2026-11-04T02:37:29Z",
       "id": "CAPTURE-0003",
       "status": "COMPLETED"
     },
@@ -30,8 +30,8 @@
   "payer": "ellis@lamplight.example",
   "paypal_order_id": "ORDER-0001",
   "protocol": "lamplight-checkout/1",
-  "quote_id": "294d831a-7327-4ade-a598-1796787d7694",
-  "receipt_hash": "0x9c26821c10fab4b732637d8ffdf99b580cc68342a4a245d0fe80da9613ab5a4c",
+  "quote_id": "2444ce83-1a09-4f44-997c-8be3c672110f",
+  "receipt_hash": "0x77d911d1a43b649ea78c3cf7db3db7e1c027a86fb514571ce960552e65229b1a",
   "service": "on-chain holder audit (top-20 wallets)",
   "settlement_method": "observed",
   "type": "settlement-receipt",

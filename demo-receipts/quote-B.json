@@ -1,13 +1,13 @@
 {
   "currency": "USD",
-  "expires_at": 1793650329,
-  "issued_at": 1793646729,
+  "expires_at": 1793763449,
+  "issued_at": 1793759849,
   "network": "PayPal Sandbox",
-  "nonce": "af25873651f04d61",
+  "nonce": "0349ee99de8641b0",
   "pay_to": "writer-02@lamplight.example",
   "price_cents": 800,
   "protocol": "lamplight-checkout/1",
-  "quote_hash": "0xb9235d72eb2d6824f6aaa1acf7ffd652639c56bee4705dfde7968af75d5080d5",
-  "quote_id": "3919dd64-d46f-4ba7-8cf3-1614cae6b62c",
+  "quote_hash": "0x05683296e369115db9f9734987f4f1ec6ea734817b6fc378e2536c3e9e2e55b8",
+  "quote_id": "fb933e65-72ee-4841-b47e-8295be3f9c60",
   "service": "research summary and write-up"
 }

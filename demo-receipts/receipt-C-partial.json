@@ -9,7 +9,7 @@
   "capture_status": null,
   "currency": "USD",
   "delivery_hash": "564a40fbe21bcf002822c8baf1de8385aa84db94bf3bad3ac074e2209f102a44",
-  "job_id": "b2a29dd86517423ca0fc5417122361f0",
+  "job_id": "4620eea8cd6c45299db35eabc1d50af9",
   "last_paypal_response": {
     "body": {
       "amount": {
@@ -26,22 +26,22 @@
           "status": "COMPLETED"
         }
       ],
-      "create_time": "2026-11-02T19:12:15Z",
-      "expiration_time": "2026-12-01T19:12:15Z",
+      "create_time": "2026-11-04T02:37:35Z",
+      "expiration_time": "2026-12-03T02:37:35Z",
       "id": "AUTH-0007",
-      "status": "VOIDED"
+      "status": "CAPTURED"
     },
     "id": "AUTH-0007",
     "operation": "void",
-    "status": "VOIDED"
+    "status": "CAPTURED"
   },
   "network": "PayPal Sandbox",
   "outcome": "released",
   "payer": "ellis@lamplight.example",
   "paypal_order_id": "ORDER-0006",
   "protocol": "lamplight-checkout/1",
-  "quote_id": "359ec877-75bc-4ee7-99ef-5b03c4c9a096",
-  "receipt_hash": "0xe18ee220285bbbf6f47b263ec3882a90d6584a3008edfd2c3e21b6b1be45d3e3",
+  "quote_id": "43b8353d-2d6b-49f0-9b7a-66fadf1ff8ef",
+  "receipt_hash": "0x2e0d19e70e74c7e275bc588ecc0e68f9c5a0fb71263866fb2d0ca8c215385719",
   "service": "research summary and write-up",
   "settlement_method": "observed",
   "type": "settlement-receipt",

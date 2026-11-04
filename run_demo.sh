@@ -27,6 +27,11 @@ export PAYPAL_BASE_URL="http://127.0.0.1:5001"
 export PAYPAL_CLIENT_ID="mock"
 export PAYPAL_CLIENT_SECRET="<redacted>"
 export LAMPLIGHT_DEMO_AUTH=1
+# v8.13: fresh SQLite store per demo run (temp file). Keeps demo state
+# out of the repo dir, and the explicit config sidesteps the
+# legacy-JSON-book boot guard (which would otherwise refuse to boot
+# onto an empty jobs.db while a stale jobs.json sits in the repo).
+export LAMPLIGHT_JOBS_FILE="$(mktemp /tmp/lamplight-demo-jobs-XXXXXX.db)"
 # A fresh random secret per demo run — the boot guard refuses the test value.
 export DISPATCHER_INTENT_SECRET="$(".venv/bin/python" -c 'import secrets; print(secrets.token_hex(32))')"
 

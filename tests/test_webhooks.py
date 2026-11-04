@@ -103,16 +103,19 @@ def test_idempotency_distinct_ids():
 # ---------------------------------------------------------------------------
 
 def test_translate_known_events():
-    """All 4 mapped events translate correctly."""
+    """All 5 mapped events translate correctly."""
     assert translate_paypal_event("PAYMENT.AUTHORIZATION.CREATED") == "WH_AUTH_CREATED"
     assert translate_paypal_event("PAYMENT.AUTHORIZATION.VOIDED") == "WH_AUTH_VOIDED"
     assert translate_paypal_event("PAYMENT.CAPTURE.COMPLETED") == "WH_CAP_COMPLETED"
     assert translate_paypal_event("PAYMENT.CAPTURE.DENIED") == "WH_CAP_DENIED"
+    # v8.14: refunds route to the capture-hint (fresh-read reconcile).
+    assert translate_paypal_event("PAYMENT.CAPTURE.REFUNDED") == "WH_CAP_COMPLETED"
     assert set(PAYPAL_TO_DISPATCHER) == {
         "PAYMENT.AUTHORIZATION.CREATED",
         "PAYMENT.AUTHORIZATION.VOIDED",
         "PAYMENT.CAPTURE.COMPLETED",
         "PAYMENT.CAPTURE.DENIED",
+        "PAYMENT.CAPTURE.REFUNDED",
     }
 
 

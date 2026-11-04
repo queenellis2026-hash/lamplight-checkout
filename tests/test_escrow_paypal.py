@@ -8837,12 +8837,16 @@ def test_inspection_timer_auto_captures(client):
 
 
 def test_inspection_timer_skips_disputed(client):
-    """Suggestion #6: needs_review (an active dispute) blocks the
-    auto-capture — the job stays DELIVERED for the operator path."""
+    """Suggestion #6: needs_review (an active pause, deadline in the
+    future) blocks the auto-capture — the job stays DELIVERED.
+    v8.14: a pause with NO deadline is treated as expired (captured,
+    not skipped forever)."""
     svc, job = _delivered_job(client)
     job.inspection_deadline = int(time.time()) - 10
     job.needs_review = True
-    job.needs_review_reason = "buyer disputes delivery quality"
+    job.needs_review_reason = "payer pause: buyer disputes delivery quality"
+    job.dispute_opened_at = int(time.time())
+    job.dispute_deadline = int(time.time()) + 3600  # active pause
     svc._save(job)
     assert svc.check_inspection_deadlines() == []
     job = svc.store.get(job.job_id)
@@ -9030,7 +9034,10 @@ def test_inspection_sweep_continues_on_paypal_error(client):
     # Point job2 at a different service sharing the same stub so the
     # failure can be targeted... simpler: break job1's capture by
     # wedging it, and assert job2 still captures.
-    job1.needs_review = True  # dispute blocks job1
+    job1.needs_review = True  # active pause blocks job1
+    job1.needs_review_reason = "payer pause"
+    job1.dispute_opened_at = int(time.time())
+    job1.dispute_deadline = int(time.time()) + 3600
     svc._save(job1)
     captured = svc.check_inspection_deadlines()
     # job1 skipped (dispute); job2 captured.

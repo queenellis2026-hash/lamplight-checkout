@@ -295,6 +295,15 @@ PAYPAL_TO_DISPATCHER = {
     "PAYMENT.AUTHORIZATION.VOIDED": Event.WH_AUTH_VOIDED.value,
     "PAYMENT.CAPTURE.COMPLETED": Event.WH_CAP_COMPLETED.value,
     "PAYMENT.CAPTURE.DENIED": Event.WH_CAP_DENIED.value,
+    # v8.14: a refund is a capture-lifecycle event. It used to fall
+    # through as WH_UNKNOWN_TYPE — answered 200 BEFORE signature
+    # verification, so PayPal never retried and the books could stay
+    # CAPTURED after a refund until someone ran reconcile. These are
+    # HINTS, not commands (webhook policy §4.7): the gateway answers
+    # with a fresh-read reconcile, which already understands
+    # REFUNDED/PARTIALLY_REFUNDED. Map to the capture-hint so the
+    # refund reaches that path.
+    "PAYMENT.CAPTURE.REFUNDED": Event.WH_CAP_COMPLETED.value,
 }
 
 
