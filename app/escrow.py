@@ -537,6 +537,24 @@ class EscrowError(Exception):
         super().__init__(message)
 
 
+# Who a job is open to (marketplace framing, Nov 2026): "ai" for AI
+# agents only, "human" for humans only, "anyone" for both. Persisted
+# on the job so it survives a page refresh — the demo UI used to keep
+# it in a client-side object only, and a refresh lost it.
+VALID_WORKER_TYPES = ("ai", "human", "anyone")
+
+
+def normalize_worker_type(value) -> str:
+    """Coerce a worker_type to one of VALID_WORKER_TYPES.
+
+    Anything missing, non-string, or unrecognized becomes "anyone" —
+    the backwards-compatible default (old jobs predate the field).
+    """
+    if isinstance(value, str) and value.strip().lower() in VALID_WORKER_TYPES:
+        return value.strip().lower()
+    return "anyone"
+
+
 def _per_job_locked(method):
     """Decorator: run a settlement method under the job's per-job lock
     (round 9). capture, capture_partial and void_after_deadline all
@@ -627,11 +645,15 @@ def _audited(operation):
 
 class Job:
     def __init__(self, *, job_id: str, quote: dict, payer: str, agent: str,
-                 deadline_seconds: int = 3600):
+                 deadline_seconds: int = 3600,
+                 worker_type: str = "anyone"):
         self.job_id = job_id
         self.quote = quote
         self.payer = payer
         self.agent = agent
+        # Who the job is open to: "ai" | "human" | "anyone".
+        # Normalized at creation; old jobs (pre-field) load as "anyone".
+        self.worker_type = normalize_worker_type(worker_type)
         self.created_at = int(time.time())
         self.deadline = self.created_at + deadline_seconds
         self.status = "QUOTED"          # QUOTED | AUTHORIZED | DELIVERED | CAPTURED | VOIDED
@@ -893,6 +915,8 @@ class Job:
             "currency": self.quote.get("currency", "USD"),
             "payer": self.payer,
             "agent": self.agent,
+            # Who the job is open to (ai | human | anyone).
+            "worker_type": self.worker_type,
             "quote_id": self.quote["quote_id"],
             "created_at": self.created_at,
             "deadline": self.deadline,
@@ -975,6 +999,9 @@ class Job:
             "created_at": self.created_at,
             "deadline": self.deadline,
             "settled_at": self.settled_at,
+            # Who the job is open to (ai | human | anyone) — public
+            # so the marketplace can filter without auth.
+            "worker_type": self.worker_type,
         }
 
     def to_store_dict(self) -> dict:
@@ -986,6 +1013,8 @@ class Job:
             "quote": self.quote,
             "payer": self.payer,
             "agent": self.agent,
+            # Who the job is open to (ai | human | anyone).
+            "worker_type": self.worker_type,
             "created_at": self.created_at,
             "deadline": self.deadline,
             "status": self.status,
@@ -1047,7 +1076,8 @@ class Job:
         """Rebuild a Job saved by to_store_dict()."""
         job = cls(job_id=data["job_id"], quote=data["quote"],
                   payer=data["payer"], agent=data["agent"],
-                  deadline_seconds=0)
+                  deadline_seconds=0,
+                  worker_type=data.get("worker_type", "anyone"))
         job.created_at = data["created_at"]
         job.deadline = data["deadline"]
         job.status = data["status"]
@@ -1677,7 +1707,8 @@ class EscrowService:
                 f"-attempt-{job.capture_attempt}")
 
     def create_job(self, *, quote: dict, payer: str, agent: str,
-                   deadline_seconds: int = 3600) -> Job:
+                   deadline_seconds: int = 3600,
+                   worker_type: str = "anyone") -> Job:
         # Round 9: job ids are full UUID hex (32 characters). The old
         # 8-hex-character ids (32 bits) collided often enough to
         # matter, and a collision silently overwrote the existing job
@@ -1699,7 +1730,8 @@ class EscrowService:
             if self.store.get(job_id) is None:
                 break
         job = Job(job_id=job_id, quote=quote, payer=payer,
-                  agent=agent, deadline_seconds=deadline_seconds)
+                  agent=agent, deadline_seconds=deadline_seconds,
+                  worker_type=worker_type)
         self.store.save(job)
         return job
 

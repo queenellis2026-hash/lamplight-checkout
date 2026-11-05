@@ -133,7 +133,7 @@ from app.auth import (AuthError, authenticate, require_agent, require_payer,  # 
                       require_storefront_token)
 from app.dispatcher import GuardRejection, UnhandledTransition  # noqa: E402
 from app.escrow import (EscrowError, EscrowService,  # noqa: E402
-                        sanitize_paypal_record)
+                        normalize_worker_type, sanitize_paypal_record)
 from app.hiring_agent import HiringAgent  # noqa: E402
 from app.paypal_client import PayPalClient, PayPalConfigError, PayPalError  # noqa: E402
 from app.receipt import build_receipt, to_public_receipt  # noqa: E402
@@ -835,6 +835,141 @@ def mock_proxy(subpath):
         return jsonify({"error": f"mock proxy failed: {e}"}), 502
 
 
+# ---------------------------------------------------------------------------
+# Demo worker model + verifier (two-chair demo).
+#
+# These endpoints exist so the demo page can show an AI worker that ACTUALLY
+# writes a delivery from the brief — not a canned string — and a verifier
+# that scores the delivery against the brief to decide full / partial / no
+# release. Both are deterministic and demo-grade: in production the worker
+# is a real agent (LLM behind their API) and the verifier is the payer's
+# own check. They move no money and are gated like the other demo routes.
+# ---------------------------------------------------------------------------
+
+def _demo_write_delivery(brief: str, parsed: dict, worker: dict,
+                         depth: str = "full") -> str:
+    """Deterministic demo worker: builds delivery text from the brief's
+    parsed keywords, so the output actually depends on the input.
+    depth="partial" covers roughly half the keywords, simulating
+    incomplete work (the verifier will score it partial)."""
+    keywords = parsed.get("keywords") or ["general"]
+    service = parsed.get("service", "task")
+    blurb = worker.get("blurb", service)
+    agent_id = worker.get("agent_id", "worker")
+    if depth == "partial":
+        keep = max(1, len(keywords) // 2)
+        covered, dropped = keywords[:keep], keywords[keep:]
+    else:
+        covered, dropped = keywords, []
+    cov = ", ".join(covered)
+    if agent_id.startswith("auditor"):
+        text = (f"audit report — top-20 holders reviewed for {cov}. "
+                f"findings: holdings concentrated as expected, no anomalies "
+                f"beyond the usual whale wallets.")
+    elif agent_id.startswith("writer"):
+        text = (f"research summary — {cov} covered. "
+                f"key points drafted from the brief, ready for review.")
+    elif agent_id.startswith("coder"):
+        text = (f"script delivered — automates {cov}. "
+                f"tested against the brief's requirements, runs clean.")
+    else:
+        text = f"delivery for {service} — {cov} addressed per the brief."
+    if dropped:
+        text += " [partial delivery — remaining items not covered]"
+    return text
+
+
+@app.route("/demo/worker-write", methods=["POST"])
+def demo_worker_write():
+    _storefront_gate()
+    body = _json_body()
+    if body is None:
+        return jsonify({"error": "request body must be a JSON object"}), 400
+    brief = body.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return jsonify({"error": "brief is required"}), 400
+    depth = body.get("depth", "full")
+    if depth not in ("full", "partial"):
+        depth = "full"
+    try:
+        parsed = hiring.parse_brief(brief)
+        worker = hiring.match_worker(parsed)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    delivery_text = _demo_write_delivery(brief, parsed, worker, depth)
+    return jsonify({
+        "delivery_text": delivery_text,
+        "worker": worker["agent_id"],
+        "service": worker["blurb"],
+        "price_cents": worker["price_cents"],
+        "depth": depth,
+        "keywords": parsed.get("keywords", []),
+    })
+
+
+@app.route("/demo/verify", methods=["POST"])
+def demo_verify():
+    """Demo verifier: scores a delivery against the brief by keyword
+    overlap. Returns verdict (full | partial | none), the fraction of
+    brief keywords found in the delivery, and a suggested capture amount
+    in cents (for partial: price * fraction, rounded)."""
+    _storefront_gate()
+    body = _json_body()
+    if body is None:
+        return jsonify({"error": "request body must be a JSON object"}), 400
+    brief = body.get("brief")
+    delivery_text = body.get("delivery_text")
+    price_cents = body.get("price_cents")
+    if not isinstance(brief, str) or not brief.strip():
+        return jsonify({"error": "brief is required"}), 400
+    if not isinstance(delivery_text, str) or not delivery_text.strip():
+        return jsonify({"error": "delivery_text is required"}), 400
+    if not isinstance(price_cents, int) or price_cents < 0:
+        return jsonify({"error": "price_cents must be a non-negative integer"}), 400
+    parsed = hiring.parse_brief(brief)
+    keywords = parsed.get("keywords") or []
+    text = delivery_text.lower()
+    if keywords:
+        hits = [kw for kw in keywords if kw in text]
+        missed = [kw for kw in keywords if kw not in text]
+        fraction = len(hits) / len(keywords)
+    else:
+        # No checkable keywords in the brief — fall back to a length
+        # heuristic so the demo still resolves.
+        hits, missed = [], []
+        fraction = 1.0 if len(delivery_text.strip()) >= 20 else 0.0
+    if fraction >= 0.8:
+        verdict = "full"
+    elif fraction >= 0.4:
+        verdict = "partial"
+    else:
+        verdict = "none"
+    if verdict == "full":
+        suggested_cents = price_cents
+    elif verdict == "partial":
+        suggested_cents = int(round(price_cents * fraction))
+    else:
+        suggested_cents = 0
+    if verdict == "full":
+        reason = (f"delivery covers {len(hits)}/{len(keywords) or 1} brief "
+                  f"keywords — full release.")
+    elif verdict == "partial":
+        reason = (f"delivery covers {len(hits)}/{len(keywords)} brief keywords "
+                  f"({', '.join(hits)}); missing {', '.join(missed) or '—'} — "
+                  f"partial release of {suggested_cents / 100:.2f}.")
+    else:
+        reason = (f"delivery covers {len(hits)}/{len(keywords)} brief keywords — "
+                  f"no release.")
+    return jsonify({
+        "verdict": verdict,
+        "fraction": round(fraction, 3),
+        "hits": hits,
+        "missed": missed,
+        "suggested_cents": suggested_cents,
+        "reason": reason,
+    })
+
+
 @app.route("/jobs", methods=["POST"])
 @idempotent
 def create_job():
@@ -854,6 +989,10 @@ def create_job():
         ttl_seconds = _parse_seconds(body.get("ttl_seconds"), "ttl_seconds", 3600)
         deadline_seconds = _parse_seconds(body.get("deadline_seconds"),
                                           "deadline_seconds", 3600)
+        # Marketplace: who the job is open to (ai | human | anyone).
+        # Optional — normalize_worker_type defaults anything
+        # missing/invalid to "anyone".
+        worker_type = normalize_worker_type(body.get("worker_type"))
         quote, worker = hiring.negotiate(brief, ttl_seconds=ttl_seconds)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -890,7 +1029,8 @@ def create_job():
                                  "retry shortly"}), 429, {"Retry-After": "60"}
     job = svc.create_job(quote=quote, payer=hiring.paypal_id,
                          agent=worker["paypal_id"],
-                         deadline_seconds=deadline_seconds)
+                         deadline_seconds=deadline_seconds,
+                         worker_type=worker_type)
     try:
         order = svc.create_order(job)
     except (PayPalError, PayPalConfigError) as e:
@@ -953,6 +1093,10 @@ def authorize_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite).
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict()})
 
 
@@ -985,6 +1129,10 @@ def deliver_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite).
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict(), "delivery_hash": dh})
 
 
@@ -1017,6 +1165,11 @@ def capture_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite) — the response must carry the settled state and
+    # the receipt, not the pre-capture snapshot.
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
 
 
@@ -1135,6 +1288,11 @@ def capture_partial_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite) — the response must carry the settled state and
+    # the receipt, not the pre-capture snapshot.
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
 
 
@@ -1164,6 +1322,11 @@ def void_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite) — the response must carry the settled state and
+    # the receipt, not the pre-void snapshot.
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
 
 
@@ -1193,6 +1356,11 @@ def force_settle_job(job_id):
         return _guard_rejection_response(e)
     except EscrowError as e:
         return jsonify({"error": str(e)}), 409
+    # Re-read before serializing: the dispatcher path settles a
+    # store-fresh copy, so the pre-action `job` is stale on durable
+    # stores (SQLite) — the response must carry the settled state and
+    # the receipt, not the pre-settlement snapshot.
+    job = escrow().get_job(job_id)
     return jsonify({"job": job.to_dict(), "receipt": _receipt_for(job)})
 
 
