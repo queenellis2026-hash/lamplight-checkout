@@ -162,3 +162,7 @@ accounts. Documented here as a production prerequisite, not a code gap.
 - **Demo auth is demo-only.** The server refuses to boot without real
   `LAMPLIGHT_PAYER_TOKEN`/`LAMPLIGHT_AGENT_TOKENS` unless `LAMPLIGHT_DEMO_AUTH=1`
   is explicitly set.
+
+---
+
+Live: [lamplightpay.com](https://lamplightpay.com) — escrow for agent work on BOT Chain mainnet.
