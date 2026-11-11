@@ -4,12 +4,13 @@ Ellis (the hiring agent) takes a plain-language brief, turns it into a
 structured job, negotiates a quote with a worker agent, and verifies the
 delivery hash before releasing payment.
 
-The negotiation policy in this demo is deterministic (parse the brief,
-match the service, take the worker's listed price) so the demo runs
-offline and reproducibly. The policy is a single swappable hook:
+The brief parsing is done by a real language model when one is wired in:
 pass any callable as `llm` with the signature
     llm(prompt: str) -> str
-(e.g. a real model call) and it replaces the deterministic parser.
+(e.g. a real model call) and it does the parse. With no llm, the parser
+is deterministic (regex + keyword match) so the demo runs offline and
+reproducibly. The live wiring is `app.ollama_llm.make_llm()`, which calls
+a local Ollama model (qwen2.5:7b) when LAMPLIGHT_LLM=ollama is set.
 Nothing else in the flow changes — the escrow, the receipts and the
 PayPal calls are identical either way.
 """
@@ -51,7 +52,9 @@ class HiringAgent:
         if self.llm is not None:
             raw = self.llm(
                 "Parse this hiring brief into JSON with keys service, "
-                f"budget_cents (integer or null), keywords (list): {brief}")
+                "budget_cents (integer or null), keywords (list). "
+                "Return ONLY the JSON object, no other text. "
+                f"Brief: {brief}")
             import json
             return json.loads(raw)
         text = brief.lower()

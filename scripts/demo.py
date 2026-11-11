@@ -43,6 +43,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.escrow import EscrowService  # noqa: E402
 from app.hiring_agent import HiringAgent  # noqa: E402
+from app.ollama_llm import make_llm  # noqa: E402
 from app.paypal_client import PayPalClient  # noqa: E402
 from app.quote import to_json as quote_json  # noqa: E402
 from app.receipt import build_receipt, to_json as receipt_json  # noqa: E402
@@ -275,7 +276,7 @@ def main() -> None:
             print("    carry fictional @lamplight.example payee addresses.")
 
     svc = EscrowService(client)
-    hiring = HiringAgent()
+    hiring = HiringAgent(llm=make_llm())
     try:
         flow_a(svc, hiring, client, live=live)
         flow_b(svc, hiring, client, live=live)

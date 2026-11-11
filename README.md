@@ -1,12 +1,22 @@
-# Lamplight PayPal Checkout v8.14 — Full Runnable Build
+# Lamplight PayPal Checkout v8.15 — Full Runnable Build
 
-**1110 tests, 0 failures, flag ON** (`USE_DISPATCHER = True` in `app/escrow.py:146`)
+**1135 tests, 0 failures, flag ON** (`USE_DISPATCHER = True` in `app/escrow.py:146`)
 
 **Demo video (2:07):** https://youtu.be/UtGjA2PR3ew
 
 Trust shouldn't be the price of doing business. PayPal-powered conditional payment
 coordination: an agent can hire another agent, the money stays held until the
 delivery matches, and a partial job pays partial and gives the rest back.
+
+**The AI inside the project:** the hiring agent (Ellis) takes a plain-language
+brief and turns it into a structured job — and that parse is done by a real
+language model when it runs. With `LAMPLIGHT_LLM=ollama` set, every brief goes
+through qwen2.5:7b served locally by Ollama (`app/ollama_llm.py`); the model
+extracts the service, budget, and keywords as JSON, and the rest of the flow
+(worker match, quote, escrow, PayPal capture) runs unchanged. Without the flag
+the parser is deterministic (regex + keyword match) so the demo runs offline
+and reproducibly. AI is not a build tool here — it runs inside the finished
+app, on every hire.
 
 **The pitch:** we used PayPal Authorizations as a real escrow lock for
 agent-to-agent work. Money is held, delivery is hashed and verified, full or
@@ -52,7 +62,26 @@ PayPal's `PERMISSION_DENIED` live — the script catches it and explains why
 ```
 
 Requires Python 3.12+. Creates `.venv`, installs dependencies, runs the full
-suite. Expected: **1110 passed** in ~30 seconds.
+suite. Expected: **1135 passed** in ~30 seconds.
+
+## Run the demo with live AI
+
+```bash
+# Start Ollama (qwen2.5:7b) if it is not already running:
+ollama serve & ollama pull qwen2.5:7b
+
+LAMPLIGHT_LLM=ollama DISPATCHER_INTENT_SECRET=test-secret \
+  python scripts/demo.py
+```
+
+With `LAMPLIGHT_LLM=ollama` the hiring agent's brief parse is done by the
+model on every flow; without it the deterministic parser runs instead.
+The server wires the same flag (`app/server.py` reads `make_llm()` at boot).
+Optional overrides: `LAMPLIGHT_OLLAMA_MODEL` (default `qwen2.5:7b`),
+`LAMPLIGHT_OLLAMA_URL` (default `http://127.0.0.1:11434`),
+`LAMPLIGHT_LLM_TIMEOUT` (default 120s). If Ollama is unreachable the
+hiring agent raises a clear error instead of silently falling back —
+the demo is honest about whether AI is running.
 
 ## Run the demo
 
@@ -64,8 +93,8 @@ Three flows: happy path (full capture), timeout void, partial release.
 
 ## What's here
 
-- `app/` — all 13 modules (dispatcher, escrow, sweeper, webhooks, server, store + paypal_client, quote, auth, hiring_agent, receipt, audit, __init__)
-- `tests/` — 11 active test files + conftest.py; `tests/history/` holds 16
+- `app/` — all 14 modules (dispatcher, escrow, sweeper, webhooks, server, store + paypal_client, quote, auth, hiring_agent, ollama_llm, receipt, audit, __init__)
+- `tests/` — 12 active test files + conftest.py; `tests/history/` holds 16
   version-scoped files (v6.1–v8.5) that still run as part of the suite
 - `scripts/` — demo.py, mock_paypal.py
 - `docs/` — arbiter policy, deployment + incident-response plan, sandbox test plan

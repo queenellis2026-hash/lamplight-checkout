@@ -135,6 +135,7 @@ from app.dispatcher import GuardRejection, UnhandledTransition  # noqa: E402
 from app.escrow import (EscrowError, EscrowService,  # noqa: E402
                         normalize_worker_type, sanitize_paypal_record)
 from app.hiring_agent import HiringAgent  # noqa: E402
+from app.ollama_llm import make_llm  # noqa: E402
 from app.paypal_client import PayPalClient, PayPalConfigError, PayPalError  # noqa: E402
 from app.receipt import build_receipt, to_public_receipt  # noqa: E402
 from app.store import (IDEMPOTENCY_KEY_TTL_SECONDS, JsonFileStore,  # noqa: E402
@@ -403,7 +404,7 @@ def idempotent(view):
 # is meaningless.
 MAX_SECONDS = 29 * 24 * 3600
 
-hiring = HiringAgent()
+hiring = HiringAgent(llm=make_llm())
 
 
 def _paypal() -> PayPalClient:

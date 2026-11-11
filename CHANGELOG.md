@@ -3,6 +3,27 @@
 Version-by-version fix history. The current contract is in `README.md`;
 this file is the archaeology.
 
+## v8.15 (live AI in the hiring agent, Nov 11)
+
+Eligibility fix: the PayPal hackathon rules require AI to run *inside* the
+finished project, not just in the tools used to build it. The hiring agent
+already had an `llm` hook, but nothing wired a real model into it — the demo
+ran a deterministic parser. Now it does:
+
+1. **New module `app/ollama_llm.py`.** Calls a local Ollama model
+   (qwen2.5:7b) via `/api/generate`, temperature 0, and extracts clean JSON
+   from the reply (strips ```json fences and surrounding prose). Raises a
+   clear `OllamaUnavailable` instead of silently falling back when the
+   server is down or the model is missing.
+2. **Wired in by env flag.** `app/server.py` and `scripts/demo.py` both
+   build the hiring agent with `HiringAgent(llm=make_llm())`. With
+   `LAMPLIGHT_LLM=ollama` every brief is parsed by the model; without it
+   the deterministic parser runs (tests and offline demos unchanged).
+3. **13 new tests** (`tests/test_ollama_llm.py`): JSON extraction, env
+   wiring, unreachable-server and missing-model errors, and the hiring
+   agent negotiating through a fake LLM. Suite now 1135 passed.
+4. **README documents the AI** — what runs, where, and how to turn it on.
+
 ## v8.14 (demo hardening, post-Grok)
 
 Hackathon triage must-fix items, no version bump:
